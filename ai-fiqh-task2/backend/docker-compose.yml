@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  qdrant:
+    image: qdrant/qdrant
+    container_name: qdrant-ai-fiqh-task-2
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ../qdrant/data:/qdrant/storage
+    networks:
+      - ai-fiqh-network
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fastapi-shariah-compliance
+    ports:
+      - "8000:8000"
+    environment:
+      - QDRANT_HOST=qdrant-ai-fiqh-task-2
+      - QDRANT_PORT=6333
+      - QDRANT_CONTRACTS_COLLECTION=shariah-contracts
+      - QDRANT_REGULATIONS_COLLECTION=shariah-regulations-law
+      - EMBEDDING_MODEL=all-MiniLM-L6-v2
+      - EMBEDDING_DIMENSION=384
+      - LLM_API_URL=
+      - LLM_MODEL_NAME=g
+    volumes:
+      - ./app:/app/app
+    networks:
+      - ai-fiqh-network
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+
+networks:
+  ai-fiqh-network:
+    driver: bridge
