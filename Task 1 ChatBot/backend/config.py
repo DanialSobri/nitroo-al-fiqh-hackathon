@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.7
     
     # Ollama Configuration (if using direct Ollama)
-    ollama_url: str = "https://v-wkp54x2qz-11434.tma01.com.my/"  # Base URL for Ollama
+    ollama_url: str = "https://example.com.my/"  # Base URL for Ollama
     ollama_model: str = "phi4:14b"  # Model name to use
     
     # API Gateway Configuration (deprecated - use ollama instead)
