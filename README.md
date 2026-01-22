@@ -10,4 +10,4 @@ Tathqeeb is an AI-powered Shariah compliance agent that never rests. It continuo
 
 ## Demo
 
-Link to youtube []
+[Watch Demo Video](https://youtu.be/mO9mnDhZJ14)
