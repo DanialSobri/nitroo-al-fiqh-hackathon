@@ -1,0 +1,62 @@
+# Web Scraper .gitignore
+
+# Environment variables
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+build/
+dist/
+*.egg-info/
+*.egg
+*.whl
+
+# Downloaded PDFs (large files)
+pdfs/
+*.pdf
+
+# Debug HTML files
+debug_*.html
+*.html
+
+# Qdrant Database
+qdrant_db/
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-journal
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.cache
+
+# Testing
+.pytest_cache/
+.coverage
+.tox/
+.hypothesis/

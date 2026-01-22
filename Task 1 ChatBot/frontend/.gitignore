@@ -1,0 +1,77 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+.yarn/
+.npm/
+
+# testing
+coverage/
+.nyc_output/
+
+# next.js
+.next/
+out/
+.vercel/
+
+# production
+build/
+dist/
+
+# misc
+.DS_Store
+*.pem
+*.log
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# local env files
+.env*.local
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+*.tmp
+*.temp
+*.cache
+.cache/
+
+# Service Worker
+sw.js.map
+workbox-*.js
+precache-manifest.*.js
+
+# Additional patterns
+.env.local
+.env*.local
+node_modules/
+*.whl
+logs/
+.pytest_cache/
+.coverage
+*.tmp
+*.cache
