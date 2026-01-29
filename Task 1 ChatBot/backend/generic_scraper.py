@@ -1,5 +1,7 @@
 """Generic scraper class for custom sources"""
 import sys
+import time
+import requests
 from pathlib import Path
 from typing import Optional
 from bs4 import BeautifulSoup
@@ -125,6 +127,113 @@ class GenericScraper(BNMScraper):
         
         return pdf_links
     
+    def find_pdf_links_direct(self, soup: BeautifulSoup, base_url: str) -> list:
+        """Find PDF links directly from all links on the page"""
+        pdf_links = []
+        
+        # Find all links
+        links = soup.find_all('a', href=True)
+        for link in links:
+            href = link.get('href', '')
+            if not href or href.strip() in ['', '#', 'about:blank', 'javascript:void(0)']:
+                continue
+            
+            # Skip invalid URLs
+            if href.startswith('javascript:') or href.startswith('mailto:') or href.startswith('tel:'):
+                continue
+            
+            href_lower = href.lower()
+            
+            # Check if it's a PDF link by extension
+            is_pdf_by_extension = (href_lower.endswith('.pdf') or '.pdf' in href_lower)
+            
+            # Check if link text suggests it's a PDF
+            link_text = link.get_text(strip=True).lower()
+            is_pdf_by_text = ('pdf' in link_text or 'muat turun' in link_text or 'download' in link_text)
+            
+            # Check content type
+            is_pdf_by_type = 'application/pdf' in link.get('type', '').lower()
+            
+            # Check if it's likely a PDF (has download attribute or specific classes)
+            has_download_attr = link.get('download', '').lower().endswith('.pdf')
+            has_pdf_class = any('pdf' in str(c).lower() for c in link.get('class', []))
+            
+            # Exclude non-PDF file types
+            excluded_extensions = ['.html', '.htm', '.aspx', '.php', '.jsp', '.xlsx', '.xls', '.doc', '.docx', '.zip', '.rar', '.txt', '.xml', '.jpg', '.jpeg', '.png', '.gif']
+            is_excluded = any(href_lower.endswith(ext) for ext in excluded_extensions)
+            
+            # Consider it a PDF if:
+            # 1. Has .pdf extension, OR
+            # 2. Link text suggests PDF and doesn't have excluded extension, OR
+            # 3. Has PDF content type, OR
+            # 4. Has download attribute or PDF class
+            if (is_pdf_by_extension or 
+                (is_pdf_by_text and not is_excluded and not any(ext in href_lower for ext in excluded_extensions)) or
+                is_pdf_by_type or 
+                has_download_attr or 
+                has_pdf_class):
+                
+                try:
+                    full_url = urljoin(base_url, href)
+                    # Skip invalid URLs
+                    if not full_url.startswith(('http://', 'https://')):
+                        continue
+                    
+                    # Skip if already in list
+                    if not any(p['url'] == full_url for p in pdf_links):
+                        link_text_display = link.get_text(strip=True) or link.get('title', '') or 'Untitled PDF'
+                        pdf_links.append({
+                            'url': full_url,
+                            'text': link_text_display,
+                            'date': '',
+                            'type': ''
+                        })
+                except Exception as e:
+                    print(f"  Warning: Invalid URL {href}: {e}")
+                    continue
+        
+        # Also check for iframes with PDFs (skip about:blank)
+        iframes = soup.find_all('iframe', src=True)
+        for iframe in iframes:
+            src = iframe.get('src', '')
+            if not src or src.strip() in ['', 'about:blank']:
+                continue
+            
+            if '.pdf' in src.lower() or 'application/pdf' in iframe.get('type', '').lower():
+                try:
+                    full_url = urljoin(base_url, src)
+                    if full_url.startswith(('http://', 'https://')) and not any(p['url'] == full_url for p in pdf_links):
+                        pdf_links.append({
+                            'url': full_url,
+                            'text': iframe.get('title', '') or 'Embedded PDF',
+                            'date': '',
+                            'type': ''
+                        })
+                except Exception:
+                    continue
+        
+        # Check for embed/object tags
+        embeds = soup.find_all(['embed', 'object'], src=True)
+        for embed in embeds:
+            src = embed.get('src', '') or embed.get('data', '')
+            if not src or src.strip() in ['', 'about:blank']:
+                continue
+            
+            if src and ('.pdf' in src.lower() or 'application/pdf' in embed.get('type', '').lower()):
+                try:
+                    full_url = urljoin(base_url, src)
+                    if full_url.startswith(('http://', 'https://')) and not any(p['url'] == full_url for p in pdf_links):
+                        pdf_links.append({
+                            'url': full_url,
+                            'text': embed.get('title', '') or 'Embedded PDF',
+                            'date': '',
+                            'type': ''
+                        })
+                except Exception:
+                    continue
+        
+        return pdf_links
+    
     def find_pdf_links(self, soup: BeautifulSoup, base_url: str) -> list:
         """Find PDF links based on scraping strategy"""
         if self.scraping_strategy == "form_based":
@@ -132,8 +241,8 @@ class GenericScraper(BNMScraper):
         elif self.scraping_strategy == "table_based":
             return self.find_pdf_links_from_table(soup, base_url)
         else:
-            # Default: direct links
-            return self.find_pdf_links_from_table(soup, base_url)
+            # Default: direct links - search all links, iframes, embeds
+            return self.find_pdf_links_direct(soup, base_url)
     
     def download_pdf_from_form(self, form_info: dict, filename: str) -> str:
         """Download PDF by submitting a form"""
@@ -259,15 +368,233 @@ class GenericScraper(BNMScraper):
         if self.scraping_strategy == "form_based":
             use_selenium = True
         
-        # Get page content
-        soup = self.get_page_content(self.base_url, use_selenium=use_selenium)
+        # First, check if the URL itself serves a PDF (before parsing HTML)
+        print("Checking if URL serves PDF directly...")
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/pdf,application/octet-stream,*/*'
+            }
+            response = requests.head(self.base_url, headers=headers, timeout=10, allow_redirects=True)
+            content_type = response.headers.get('Content-Type', '').lower()
+            if 'application/pdf' in content_type:
+                print(f"  ✓ URL directly serves PDF! Content-Type: {content_type}")
+                pdf_links = [{
+                    'url': self.base_url,
+                    'text': 'PDF Document',
+                    'date': '',
+                    'type': ''
+                }]
+            else:
+                print(f"  URL serves: {content_type}")
+                # Also check first bytes to see if it's actually a PDF
+                try:
+                    response_get = requests.get(self.base_url, headers=headers, timeout=10, stream=True, allow_redirects=True)
+                    first_bytes = response_get.content[:4] if len(response_get.content) >= 4 else b''
+                    if first_bytes == b'%PDF':
+                        print(f"  ✓ URL serves PDF (detected by magic bytes)!")
+                        pdf_links = [{
+                            'url': self.base_url,
+                            'text': 'PDF Document',
+                            'date': '',
+                            'type': ''
+                        }]
+                    else:
+                        pdf_links = []
+                except:
+                    pdf_links = []
+        except Exception as e:
+            print(f"  Could not check URL directly: {e}")
+            pdf_links = []
         
-        # Find PDF links based on strategy
-        pdf_links = self.find_pdf_links(soup, self.base_url)
-        print(f"Found {len(pdf_links)} PDF links")
+        # If URL doesn't serve PDF directly, parse HTML
+        if not pdf_links:
+            # Get page content
+            soup = self.get_page_content(self.base_url, use_selenium=use_selenium)
+            
+            # Find PDF links based on strategy
+            pdf_links = self.find_pdf_links(soup, self.base_url)
+            print(f"Found {len(pdf_links)} PDF links")
+            
+            # If no PDFs found and not using Selenium, try with Selenium (for JS-rendered content)
+            if not pdf_links and not use_selenium and SELENIUM_AVAILABLE:
+                print("No PDFs found with basic scraping. Trying with Selenium (JavaScript rendering)...")
+                soup = self.get_page_content(self.base_url, use_selenium=True)
+                pdf_links = self.find_pdf_links(soup, self.base_url)
+                print(f"Found {len(pdf_links)} PDF links with Selenium")
+            
+            # Save HTML for debugging if no links found
+            if not pdf_links:
+                debug_file = self.output_dir / "debug_page.html"
+                try:
+                    with open(debug_file, 'w', encoding='utf-8') as f:
+                        f.write(str(soup.prettify()))
+                    print(f"  Saved page HTML to: {debug_file} for inspection")
+                except:
+                    pass
+        
+        # Check if the page itself serves a PDF (some sites serve PDFs without .pdf extension)
+        if not pdf_links:
+            print("No PDF links found. Checking if page URL itself serves a PDF...")
+            try:
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/pdf,application/octet-stream,*/*'
+                }
+                response = requests.head(self.base_url, headers=headers, timeout=10, allow_redirects=True)
+                content_type = response.headers.get('Content-Type', '').lower()
+                if 'application/pdf' in content_type:
+                    print(f"  Page itself serves PDF! Content-Type: {content_type}")
+                    pdf_links.append({
+                        'url': self.base_url,
+                        'text': soup.title.string if soup.title else 'Page PDF',
+                        'date': '',
+                        'type': ''
+                    })
+            except Exception as e:
+                print(f"  Page is not a PDF: {e}")
+        
+        # Check for common PDF URL patterns (e.g., adding ?download or /pdf to URL)
+        if not pdf_links:
+            print("Trying common PDF URL patterns...")
+            base_url_clean = self.base_url.rstrip('?').rstrip('/')
+            pdf_url_variants = [
+                f"{base_url_clean}.pdf",
+                f"{base_url_clean}/download",
+                f"{base_url_clean}?download=1",
+                f"{base_url_clean}?format=pdf",
+                f"{base_url_clean}/pdf",
+            ]
+            
+            for variant_url in pdf_url_variants:
+                try:
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Accept': 'application/pdf,application/octet-stream,*/*'
+                    }
+                    response = requests.head(variant_url, headers=headers, timeout=5, allow_redirects=True)
+                    content_type = response.headers.get('Content-Type', '').lower()
+                    if 'application/pdf' in content_type:
+                        pdf_links.append({
+                            'url': variant_url,
+                            'text': 'PDF Document',
+                            'date': '',
+                            'type': ''
+                        })
+                        print(f"  Found PDF via URL variant: {variant_url}")
+                        break
+                except:
+                    continue
+        
+        # Look for download buttons/links with common patterns
+        if not pdf_links:
+            print("Checking for download buttons and links...")
+            download_keywords = ['muat turun', 'download', 'pdf', 'unduh', 'muatnaik', 'muat', 'turun']
+            all_links = soup.find_all('a', href=True)
+            buttons = soup.find_all(['button', 'input'], type='button') + soup.find_all(['button', 'input'], type='submit')
+            
+            # Check all links
+            for link in all_links:
+                href = link.get('href', '')
+                text = link.get_text(strip=True).lower()
+                
+                # Skip invalid URLs
+                if not href or href.strip() in ['', '#', 'about:blank', 'javascript:void(0)']:
+                    continue
+                
+                # Check if link text suggests download
+                if any(keyword in text for keyword in download_keywords):
+                    try:
+                        full_url = urljoin(self.base_url, href)
+                        if full_url.startswith(('http://', 'https://')):
+                            # Verify it's actually a PDF by checking headers
+                            headers = {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                                'Accept': 'application/pdf,application/octet-stream,*/*'
+                            }
+                            try:
+                                response = requests.head(full_url, headers=headers, timeout=10, allow_redirects=True)
+                                content_type = response.headers.get('Content-Type', '').lower()
+                                if 'application/pdf' in content_type or 'pdf' in content_type:
+                                    pdf_links.append({
+                                        'url': full_url,
+                                        'text': link.get_text(strip=True) or 'Download PDF',
+                                        'date': '',
+                                        'type': ''
+                                    })
+                                    print(f"  Found PDF via download link: {full_url}")
+                            except:
+                                # Try GET request if HEAD fails
+                                try:
+                                    response = requests.get(full_url, headers=headers, timeout=10, stream=True, allow_redirects=True)
+                                    content_type = response.headers.get('Content-Type', '').lower()
+                                    first_bytes = response.content[:4] if len(response.content) >= 4 else b''
+                                    if first_bytes == b'%PDF' or 'application/pdf' in content_type:
+                                        pdf_links.append({
+                                            'url': full_url,
+                                            'text': link.get_text(strip=True) or 'Download PDF',
+                                            'date': '',
+                                            'type': ''
+                                        })
+                                        print(f"  Found PDF via download link (GET): {full_url}")
+                                except:
+                                    pass
+                    except:
+                        pass
         
         if not pdf_links:
+            print("\n" + "="*60)
             print("No PDF links found on the page")
+            print("="*60)
+            print("Debug: Page title:", soup.title.string if soup.title else "No title")
+            print("Debug: Total links on page:", len(soup.find_all('a', href=True)))
+            print("Debug: Total buttons on page:", len(soup.find_all(['button', 'input'])))
+            
+            # Print first few links for debugging
+            all_links = soup.find_all('a', href=True)[:10]
+            print("Debug: Sample links:")
+            if all_links:
+                for link in all_links:
+                    href = link.get('href', '')
+                    text = link.get_text(strip=True)[:50]
+                    print(f"  - {href[:80]} ({text})")
+            else:
+                print("  - No links found on page")
+            
+            # Print page structure
+            print("Debug: Page structure:")
+            print(f"  - Has body: {soup.body is not None}")
+            if soup.body:
+                body_text = soup.body.get_text()
+                print(f"  - Body text length: {len(body_text)}")
+                print(f"  - Body text preview: {body_text[:200]}")
+                
+                # Check for common PDF indicators in page content
+                if 'P.U.' in body_text or 'FATWA' in body_text or 'WARTA KERAJAAN' in body_text:
+                    print("\n  ⚠ Page appears to contain fatwa/gazette content")
+                    print("  ⚠ Note: This page displays content directly, not as a PDF link")
+                    print("  💡 Suggestion: This website may:")
+                    print("     - Display fatwa content on the page (not as downloadable PDF)")
+                    print("     - Require a different URL pattern to access PDFs")
+                    print("     - Have PDFs available at a different endpoint")
+                    print("     - Need form submission to generate/download PDFs")
+                    print("\n  💡 Try:")
+                    print("     - Check the website's main page for PDF download links")
+                    print("     - Look for a 'Download PDF' or 'Muat Turun PDF' button")
+                    print("     - Check if PDFs are available via a different URL structure")
+                    print("     - Consider using 'form_based' strategy if there's a download form")
+            
+            # Save HTML for manual inspection
+            debug_file = self.output_dir / "debug_page.html"
+            try:
+                with open(debug_file, 'w', encoding='utf-8') as f:
+                    f.write(str(soup.prettify()))
+                print(f"\n  📄 Saved page HTML to: {debug_file}")
+                print("     You can open this file in a browser to inspect the page structure")
+            except Exception as e:
+                print(f"  ⚠ Could not save debug file: {e}")
+            
+            print("="*60 + "\n")
             return
         
         # Process each PDF
@@ -278,26 +605,46 @@ class GenericScraper(BNMScraper):
                 # Generate filename
                 title = pdf_info.get('text', 'Untitled')
                 url = pdf_info.get('url', '')
+                
+                # Verify URL is valid before processing
+                if not url or url.strip() in ['', 'about:blank', '#']:
+                    print(f"  ⚠ Skipping invalid URL: {url}")
+                    continue
+                
+                if not url.startswith(('http://', 'https://')):
+                    print(f"  ⚠ Skipping non-HTTP URL: {url}")
+                    continue
+                
                 filename = self.sanitize_filename(url, title)
                 
                 # Download PDF
                 if self.scraping_strategy == "form_based":
                     filepath = self.download_pdf_from_form(pdf_info, filename)
                 else:
-                    filepath = self.download_pdf(url, filename)
+                    # Verify URL is valid before downloading
+                    if url.startswith(('http://', 'https://')):
+                        filepath = self.download_pdf(url, filename)
+                    else:
+                        print(f"  ⚠ Skipping invalid URL: {url}")
+                        continue
                 
-                # Extract text and store
-                text_chunks = self.extract_text_from_pdf(filepath)
-                if text_chunks:
-                    self.store_in_qdrant(
-                        pdf_url=url,
-                        pdf_title=title,
-                        text_chunks=text_chunks,
-                        filepath=filepath,
-                        date=pdf_info.get('date', ''),
-                        doc_type=pdf_info.get('type', '')
-                    )
-                    print(f"  ✓ Stored {len(text_chunks)} chunks")
+                # Extract text with page numbers and store
+                page_texts = self.extract_text_with_pages(filepath)
+                if page_texts:
+                    # Chunk text with page tracking
+                    chunked_data = self.chunk_text_with_pages(page_texts)
+                    if chunked_data:
+                        self.store_in_qdrant(
+                            pdf_url=url,
+                            pdf_title=title,
+                            text_chunks=chunked_data,  # Pass list of dicts with 'text' and 'page_number'
+                            filepath=filepath,
+                            date=pdf_info.get('date', ''),
+                            doc_type=pdf_info.get('type', '')
+                        )
+                        print(f"  ✓ Stored {len(chunked_data)} chunks with page numbers")
+                    else:
+                        print(f"  ⚠ No chunks created from PDF")
                 else:
                     print(f"  ⚠ No text extracted from PDF")
                     

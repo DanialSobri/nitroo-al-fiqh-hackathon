@@ -18,7 +18,7 @@ class OllamaLLM:
         Initialize Ollama LLM client
         
         Args:
-            base_url: Base URL for Ollama
+            base_url: Base URL for Ollama (e.g., localhost:6443/)
             model: Model name to use (default: phi4:14b)
         """
         # Ensure base_url ends with /
@@ -54,6 +54,20 @@ class OllamaLLM:
         Returns:
             The LLM's response text
         """
+        response_text, _ = self.invoke_with_metadata(prompt, max_retries)
+        return response_text
+    
+    def invoke_with_metadata(self, prompt: str, max_retries: int = 2):
+        """
+        Invoke the LLM with a prompt and return both content and raw response
+        
+        Args:
+            prompt: The prompt/question to send to the LLM
+            max_retries: Maximum number of retry attempts for transient errors
+            
+        Returns:
+            Tuple of (response_text, raw_response_dict)
+        """
         # Retry logic for transient errors
         last_error = None
         for attempt in range(max_retries + 1):
@@ -68,22 +82,79 @@ class OllamaLLM:
             }
             
             # Prepare payload - Ollama API format
-            payload = {
-                "model": self.model,
-                "messages": [
+            # Split prompt into system message and user message if it contains system instructions
+            # Check if prompt starts with system-like instructions
+            if prompt.startswith("You are") or "CRITICAL" in prompt[:500] or "SOURCE DOCUMENTS" in prompt:
+                # Extract system message (first part before SOURCE DOCUMENTS or Question)
+                system_parts = []
+                user_parts = []
+                
+                # Try to split at common markers
+                if "SOURCE DOCUMENTS" in prompt or "SOURCE DOCUMENT" in prompt:
+                    split_marker = "SOURCE DOCUMENTS" if "SOURCE DOCUMENTS" in prompt else "SOURCE DOCUMENT"
+                    parts = prompt.split(split_marker, 1)
+                    if len(parts) == 2:
+                        system_parts.append(parts[0].strip())
+                        user_parts.append(f"{split_marker}\n{parts[1].strip()}")
+                    else:
+                        # Fallback: use entire prompt as user message
+                        user_parts.append(prompt)
+                elif "Question:" in prompt or "Q:" in prompt:
+                    # Split at Question marker
+                    if "Question:" in prompt:
+                        parts = prompt.split("Question:", 1)
+                    else:
+                        parts = prompt.split("Q:", 1)
+                    if len(parts) == 2:
+                        system_parts.append(parts[0].strip())
+                        user_parts.append(f"Question: {parts[1].strip()}")
+                    else:
+                        user_parts.append(prompt)
+                else:
+                    # No clear split point, use entire prompt as user message
+                    user_parts.append(prompt)
+                
+                # Build messages array
+                messages = []
+                if system_parts:
+                    messages.append({
+                        "role": "system",
+                        "content": system_parts[0]
+                    })
+                messages.append({
+                    "role": "user",
+                    "content": user_parts[0] if user_parts else prompt
+                })
+            else:
+                # Standard format - single user message
+                messages = [
                     {
                         "role": "user",
                         "content": prompt
                     }
-                ],
+                ]
+            
+            payload = {
+                "model": self.model,
+                "messages": messages,
                 "stream": False
             }
             
-            # If prompt is very long, truncate it
-            max_prompt_length = 5000  # Reduced for smaller payloads
-            if len(prompt) > max_prompt_length:
-                print(f"  ⚠ Warning: Prompt is {len(prompt)} chars, truncating to {max_prompt_length}")
-                payload["messages"][0]["content"] = prompt[:max_prompt_length] + "... [truncated]"
+            # Check total prompt length (sum of all message contents)
+            total_length = sum(len(msg.get("content", "")) for msg in messages)
+            max_prompt_length = 32000  # Increased significantly - Ollama can handle large prompts
+            
+            # Never truncate if it contains SOURCE DOCUMENTS - that's critical context
+            if total_length > max_prompt_length:
+                if "SOURCE DOCUMENTS" in prompt or "SOURCE DOCUMENT" in prompt:
+                    print(f"  ⚠ Warning: Prompt is {total_length} chars but contains SOURCE DOCUMENTS - keeping full prompt (may be slow)")
+                else:
+                    print(f"  ⚠ Warning: Prompt is {total_length} chars, truncating to {max_prompt_length}")
+                    # Truncate the last user message only
+                    if messages and len(messages) > 0:
+                        last_msg = messages[-1]
+                        if "content" in last_msg:
+                            last_msg["content"] = last_msg["content"][:max_prompt_length] + "... [truncated]"
             
             try:
                 # Debug: Log full request details
@@ -182,6 +253,7 @@ class OllamaLLM:
                 
                 # Extract message content from response
                 # Ollama response format: {"message": {"role": "assistant", "content": "..."}, ...}
+                content = None
                 if isinstance(result, dict):
                     # Primary format: message.content (Ollama format)
                     if 'message' in result:
@@ -190,36 +262,51 @@ class OllamaLLM:
                             content = message_obj.get('content')
                             if content and content.strip():
                                 print(f"  ✓ Extracted content from message.content ({len(content)} chars)")
-                                return content
                         else:
                             # message is a string
                             content = str(message_obj)
                             if content and content.strip() != '{}':
-                                return content
+                                pass
+                            else:
+                                content = None
                     
                     # Other possible formats
-                    if 'content' in result:
-                        content = result['content']
-                        if content and content.strip():
-                            return content
+                    if not content:
+                        if 'content' in result:
+                            content = result['content']
+                            if content and content.strip():
+                                pass
+                            else:
+                                content = None
                     
-                    if 'text' in result:
-                        content = result['text']
-                        if content and content.strip():
-                            return content
+                    if not content:
+                        if 'text' in result:
+                            content = result['text']
+                            if content and content.strip():
+                                pass
+                            else:
+                                content = None
                     
-                    if 'response' in result:
-                        content = result['response']
-                        if content and content.strip():
-                            return content
+                    if not content:
+                        if 'response' in result:
+                            content = result['response']
+                            if content and content.strip():
+                                pass
+                            else:
+                                content = None
                     
                     # Log the full response for debugging if no content found
-                    print(f"  ⚠ Could not extract content from response. Keys: {list(result.keys())}")
-                    print(f"  Full response preview: {str(result)[:500]}")
-                    # Return the whole response as string if format is unknown
-                    return str(result)
-                else:
-                    return str(result)
+                    if not content:
+                        print(f"  ⚠ Could not extract content from response. Keys: {list(result.keys())}")
+                        print(f"  Full response preview: {str(result)[:500]}")
+                        # Return the whole response as string if format is unknown
+                        content = str(result)
+                
+                if not content:
+                    content = str(result)
+                
+                # Return both content and raw response for token usage extraction
+                return content, result
             
             except ValueError as e:
                 # Re-raise immediately for non-retryable errors
@@ -268,14 +355,25 @@ class OllamaChatLLM:
     
     def __init__(self, ollama_llm: OllamaLLM):
         self.ollama_llm = ollama_llm
+        self.last_response = None  # Store last raw response for token usage extraction
     
     def invoke(self, prompt: str):
         """Invoke method compatible with LangChain"""
-        response_text = self.ollama_llm.invoke(prompt)
+        # Store raw response for token usage extraction
+        response_text, raw_response = self.ollama_llm.invoke_with_metadata(prompt)
+        self.last_response = raw_response
         
         # Return object with .content attribute like LangChain ChatOpenAI
         class Response:
-            def __init__(self, content):
+            def __init__(self, content, response_metadata=None):
                 self.content = content
+                self.response_metadata = response_metadata or {}
         
-        return Response(response_text)
+        # Extract token usage from raw response
+        metadata = {}
+        if isinstance(raw_response, dict):
+            if 'prompt_eval_count' in raw_response:
+                metadata['prompt_eval_count'] = raw_response.get('prompt_eval_count')
+                metadata['eval_count'] = raw_response.get('eval_count')
+        
+        return Response(response_text, metadata)

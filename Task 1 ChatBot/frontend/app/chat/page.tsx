@@ -1,22 +1,25 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { ChatMessage } from '@/components/chat/chat-message';
 import { ChatInput } from '@/components/chat/chat-input';
-import { askQuestion, QuestionResponse, getCollections } from '@/lib/api';
+import { askQuestion, QuestionResponse, getCollections, getRecentConversations, getSessionConversations } from '@/lib/api';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Sidebar, ChatHistory } from '@/components/sidebar/sidebar';
 import { SidebarToggle } from '@/components/sidebar/sidebar-toggle';
 import { ThemeToggle } from '@/components/theme-toggle';
-import { Sparkles } from 'lucide-react';
+import { Sparkles, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Message extends QuestionResponse {
   id: string;
   feedback?: 'good' | 'bad' | null;
+  response_time_ms?: number;
 }
 
-export default function ChatPage() {
+function ChatPageContent() {
+  const searchParams = useSearchParams();
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -27,18 +30,56 @@ export default function ChatPage() {
   const [selectedCollections, setSelectedCollections] = useState<string[]>(['all']);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const hasAutoLoadedRef = useRef(false);
+  const isNewChatRef = useRef(false); // Track if user explicitly created a new chat
 
-  // Load chat history from localStorage
-  useEffect(() => {
-    const savedHistory = localStorage.getItem('chatHistory');
-    if (savedHistory) {
-      try {
-        setChatHistory(JSON.parse(savedHistory));
-      } catch (e) {
-        console.error('Failed to load chat history:', e);
-      }
+  // Get or create user ID
+  const getUserId = (): string => {
+    let userId = localStorage.getItem('userId');
+    if (!userId) {
+      userId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      localStorage.setItem('userId', userId);
     }
+    return userId;
+  };
 
+  // Load chat history from backend
+  const loadChatHistoryFromBackend = async () => {
+    try {
+      const userId = getUserId();
+      const { sessions } = await getRecentConversations(userId, 20);
+      
+      // Convert to ChatHistory format
+      const history: ChatHistory[] = sessions.map(session => ({
+        id: session.session_id,
+        title: session.title,
+        timestamp: new Date(session.timestamp).getTime()
+      }));
+      
+      // Merge with local storage history (prefer backend)
+      setChatHistory(history);
+      localStorage.setItem('chatHistory', JSON.stringify(history));
+      
+      return history;
+    } catch (err) {
+      console.error('Failed to load chat history from backend:', err);
+      // Fallback to local storage
+      const savedHistory = localStorage.getItem('chatHistory');
+      if (savedHistory) {
+        try {
+          const parsed = JSON.parse(savedHistory);
+          setChatHistory(parsed);
+          return parsed;
+        } catch (e) {
+          console.error('Failed to load local chat history:', e);
+        }
+      }
+      return [];
+    }
+  };
+
+  // Load chat history from localStorage and backend
+  useEffect(() => {
     // Load available collections from API
     getCollections()
       .then((cols) => {
@@ -47,7 +88,33 @@ export default function ChatPage() {
       .catch((err) => {
         console.error('Failed to load collections:', err);
       });
+    
+    // Load chat history
+    loadChatHistoryFromBackend();
   }, []);
+
+  // Handle URL parameter for session loading
+  useEffect(() => {
+    const sessionParam = searchParams?.get('session');
+    if (sessionParam && chatHistory.length > 0 && !currentChatId && !hasAutoLoadedRef.current && !isNewChatRef.current) {
+      // Check if session exists in history
+      const sessionExists = chatHistory.some(h => h.id === sessionParam);
+      if (sessionExists) {
+        hasAutoLoadedRef.current = true;
+        handleSelectChat(sessionParam);
+      }
+    }
+  }, [searchParams, chatHistory, currentChatId]);
+
+  // Auto-load most recent conversation when history is loaded and no messages are displayed
+  // BUT NOT when user explicitly created a new chat
+  useEffect(() => {
+    if (chatHistory.length > 0 && messages.length === 0 && !currentChatId && !hasAutoLoadedRef.current && !searchParams?.get('session') && !isNewChatRef.current) {
+      hasAutoLoadedRef.current = true;
+      const mostRecentSession = chatHistory[0]; // Already sorted by timestamp (most recent first)
+      handleSelectChat(mostRecentSession.id);
+    }
+  }, [chatHistory, messages.length, currentChatId, searchParams]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -58,39 +125,115 @@ export default function ChatPage() {
   }, [messages, isLoading]);
 
   const handleNewChat = () => {
+    // Set flag to prevent auto-loading
+    isNewChatRef.current = true;
+    hasAutoLoadedRef.current = true; // Set this to prevent auto-load effect
+    
     setMessages([]);
     setCurrentChatId(null);
     setError(null);
+    // Clear any pending state
+    setIsLoading(false);
+    
+    // Clear URL parameters if present
+    if (window.history.replaceState) {
+      window.history.replaceState({}, '', '/chat');
+    }
+    
     if (window.innerWidth < 768) { // Close sidebar on mobile after new chat
       setSidebarOpen(false);
     }
+    
+    // Reset the flag after state updates complete
+    // This prevents auto-load from triggering
+    setTimeout(() => {
+      isNewChatRef.current = false;
+      // Keep hasAutoLoadedRef as true to prevent auto-loading
+      // It will be reset when user manually selects a chat or sends a message
+    }, 500);
+    
+    // Reload chat history to ensure it's up to date (but don't auto-load)
+    loadChatHistoryFromBackend();
   };
 
-  const handleSelectChat = (chatId: string | null) => {
+  const handleSelectChat = async (chatId: string | null) => {
     if (!chatId) {
       handleNewChat();
       return;
     }
 
-    // Load chat from history
-    const savedChats = localStorage.getItem('chatHistory');
-    if (savedChats) {
-      try {
-        const history = JSON.parse(savedChats);
-        const chat = history.find((h: ChatHistory) => h.id === chatId);
-        if (chat) {
-          // Load messages for this chat
-          const savedMessages = localStorage.getItem(`chat_${chatId}`);
-          if (savedMessages) {
-            setMessages(JSON.parse(savedMessages));
-            setCurrentChatId(chatId);
-            if (window.innerWidth < 768) { // Close sidebar on mobile after selecting chat
-              setSidebarOpen(false);
+    // Reset flags when manually selecting a chat
+    isNewChatRef.current = false;
+    hasAutoLoadedRef.current = true; // Mark as loaded to prevent auto-load
+
+    try {
+      // Try to load from backend first
+      const { conversations } = await getSessionConversations(chatId);
+      
+      if (conversations && conversations.length > 0) {
+        // Convert to Message format
+        const messages: Message[] = conversations.map((conv, idx) => ({
+          id: conv.conversation_id || `msg_${idx}`,
+          question: conv.question,
+          answer: conv.answer,
+          references: [],
+          total_references_found: 0,
+          collections_searched: [],
+          citation_map: null
+        }));
+        
+        setMessages(messages);
+        setCurrentChatId(chatId);
+        
+        // Update chat history
+        const updatedHistory = chatHistory.map(h => 
+          h.id === chatId ? { ...h, timestamp: Date.now() } : h
+        );
+        setChatHistory(updatedHistory);
+        localStorage.setItem('chatHistory', JSON.stringify(updatedHistory));
+        
+        if (window.innerWidth < 768) {
+          setSidebarOpen(false);
+        }
+      } else {
+        // Fallback to local storage
+        const savedChats = localStorage.getItem('chatHistory');
+        if (savedChats) {
+          const history = JSON.parse(savedChats);
+          const chat = history.find((h: ChatHistory) => h.id === chatId);
+          if (chat) {
+            const savedMessages = localStorage.getItem(`chat_${chatId}`);
+            if (savedMessages) {
+              setMessages(JSON.parse(savedMessages));
+              setCurrentChatId(chatId);
+              if (window.innerWidth < 768) {
+                setSidebarOpen(false);
+              }
             }
           }
         }
-      } catch (e) {
-        console.error('Failed to load chat:', e);
+      }
+    } catch (err) {
+      console.error('Failed to load chat from backend:', err);
+      // Fallback to local storage
+      const savedChats = localStorage.getItem('chatHistory');
+      if (savedChats) {
+        try {
+          const history = JSON.parse(savedChats);
+          const chat = history.find((h: ChatHistory) => h.id === chatId);
+          if (chat) {
+            const savedMessages = localStorage.getItem(`chat_${chatId}`);
+            if (savedMessages) {
+              setMessages(JSON.parse(savedMessages));
+              setCurrentChatId(chatId);
+              if (window.innerWidth < 768) {
+                setSidebarOpen(false);
+              }
+            }
+          }
+        } catch (e) {
+          console.error('Failed to load chat:', e);
+        }
       }
     }
   };
@@ -108,11 +251,15 @@ export default function ChatPage() {
       return trimmed.substring(0, maxLength) + '...';
     };
 
-    // Create new chat if no current chat
+    // Get user ID and session ID
+    const userId = getUserId();
     let chatId = currentChatId;
     if (!chatId) {
-      chatId = Date.now().toString();
+      chatId = `chat_${Date.now()}`;
       setCurrentChatId(chatId);
+      // Reset flags when starting a new conversation
+      isNewChatRef.current = false;
+      hasAutoLoadedRef.current = true;
       
       // Add to history
       const newHistory: ChatHistory = {
@@ -150,18 +297,22 @@ export default function ChatPage() {
         ? selectedCollections 
         : savedDefaultCollections;
 
+      const sessionId = chatId;
+      
       const response = await askQuestion({
         question,
         collections: collectionsToUse,
         max_results: savedMaxResults,
         min_score: savedMinScore,
+        user_id: userId,
+        session_id: sessionId,
       });
 
       // Replace the temp message with the actual response using functional update
       setMessages((prev) => {
         const finalMessages = prev.map((msg) =>
           msg.id === messageId
-            ? { ...response, id: messageId, feedback: null }
+            ? { ...response, id: messageId, feedback: null, citation_map: response.citation_map, response_time_ms: response.response_time_ms }
             : msg
         );
         
@@ -169,6 +320,9 @@ export default function ChatPage() {
         if (chatId) {
           localStorage.setItem(`chat_${chatId}`, JSON.stringify(finalMessages));
         }
+        
+        // Reload chat history from backend to get updated list
+        loadChatHistoryFromBackend();
         
         return finalMessages;
       });
@@ -246,8 +400,8 @@ export default function ChatPage() {
                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 sm:gap-4 mt-6 sm:mt-8 w-full max-w-2xl">
                     {[
                       'What is Shariah non-tolerable income threshold?',
-                      'Explain the requirements for sukuk issuance',
-                      'What are the Shariah screening criteria?',
+                      'What if I sell liquor, how to make it shariah compliant',
+                      'Is credit card shariah compliance?',
                          ].map((example, i) => (
                            <button
                              key={i}
@@ -271,6 +425,8 @@ export default function ChatPage() {
                       isLoading={isLoading && index === messages.length - 1 && !message.answer}
                       messageId={message.id}
                       initialFeedback={message.feedback}
+                      citationMap={message.citation_map}
+                      responseTimeMs={message.response_time_ms}
                       onFeedback={(messageId, feedback) => {
                         setMessages((prev) => {
                           const updated = prev.map((msg) =>
@@ -306,5 +462,20 @@ export default function ChatPage() {
                </div>
       </div>
     </div>
+  );
+}
+
+export default function ChatPage() {
+  return (
+    <Suspense fallback={
+      <div className="flex items-center justify-center h-screen">
+        <div className="text-center space-y-4">
+          <Loader2 className="w-8 h-8 animate-spin mx-auto text-primary" />
+          <p className="text-muted-foreground">Loading chat...</p>
+        </div>
+      </div>
+    }>
+      <ChatPageContent />
+    </Suspense>
   );
 }

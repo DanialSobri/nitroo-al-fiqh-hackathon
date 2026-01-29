@@ -233,18 +233,29 @@ class BNMScraper:
                         
                         # Check if it's a PDF link
                         # Check for .pdf extension (even if URL ends with /)
-                        is_pdf = (href_clean.lower().endswith('.pdf') or 
+                        href_lower = href_clean.lower()
+                        is_pdf = (href_lower.endswith('.pdf') or 
                                  href.lower().endswith('.pdf/') or
-                                 '.pdf' in href_clean.lower())
+                                 '.pdf' in href_lower)
                         
-                        # Skip non-PDF file extensions
+                        # Skip non-PDF file extensions and page URLs
                         if not is_pdf:
                             # Check for other common file extensions to exclude
                             excluded_extensions = ['.xlsx', '.xls', '.doc', '.docx', '.zip', 
                                                   '.rar', '.txt', '.html', '.htm', '.xml']
-                            href_lower = href_clean.lower()
                             if any(href_lower.endswith(ext) for ext in excluded_extensions):
                                 continue
+                            
+                            # Exclude common page URL patterns that aren't PDFs
+                            page_patterns = [
+                                '/download-forms', '/download', '/forms', '/page/', 
+                                '/category/', '/tag/', '/search', '/index'
+                            ]
+                            if any(pattern in href_lower for pattern in page_patterns):
+                                # Only include if link text explicitly says PDF
+                                link_text_lower = link_text.lower()
+                                if not any(keyword in link_text_lower for keyword in ['pdf', 'download', 'muat turun']):
+                                    continue
                         
                         if is_pdf:
                             # Use cleaned href (already normalized above)
@@ -274,13 +285,55 @@ class BNMScraper:
         links = soup.find_all('a', href=True)
         for link in links:
             href = link.get('href', '')
-            if href.lower().endswith('.pdf') or '.pdf' in href.lower():
+            if not href or href.strip() in ['', '#', 'about:blank', 'javascript:void(0)']:
+                continue
+            
+            # Skip invalid URLs
+            if href.startswith('javascript:') or href.startswith('mailto:') or href.startswith('tel:'):
+                continue
+            
+            href_lower = href.lower()
+            
+            # Exclude common page URL patterns that aren't PDFs
+            page_patterns = ['/download-forms', '/download', '/forms', '/page/', '/category/', '/tag/', '/search', '/index']
+            if any(pattern in href_lower for pattern in page_patterns):
+                # Only include if link text explicitly says PDF and URL has .pdf
+                link_text = link.get_text(strip=True).lower()
+                if not (href_lower.endswith('.pdf') or '.pdf?' in href_lower or '.pdf/' in href_lower):
+                    # Skip page URLs unless they explicitly mention PDF in link text
+                    if not any(keyword in link_text for keyword in ['pdf', '.pdf']):
+                        continue
+            
+            # Check if it's a PDF link
+            is_pdf = (href_lower.endswith('.pdf') or 
+                     '.pdf?' in href_lower or
+                     '.pdf/' in href_lower or
+                     'application/pdf' in link.get('type', '').lower())
+            
+            # Check if link text suggests it's a PDF
+            link_text = link.get_text(strip=True).lower()
+            if not is_pdf:
+                # Check for download keywords
+                download_keywords = ['pdf', 'download', 'muat turun', 'unduh']
+                is_pdf = any(keyword in link_text for keyword in download_keywords)
+                # But still exclude page URLs even if they have download keywords
+                if is_pdf and any(pattern in href_lower for pattern in page_patterns):
+                    if not (href_lower.endswith('.pdf') or '.pdf?' in href_lower):
+                        continue
+            
+            # Exclude non-PDF file types
+            excluded_extensions = ['.xlsx', '.xls', '.doc', '.docx', '.zip', '.rar', '.txt', '.html', '.htm', '.xml', '.jpg', '.jpeg', '.png', '.gif']
+            if any(href_lower.endswith(ext) for ext in excluded_extensions):
+                continue
+            
+            if is_pdf:
                 full_url = urljoin(base_url, href)
                 # Check if this URL is already in our list
                 if not any(p['url'] == full_url for p in pdf_links):
+                    link_text_display = link.get_text(strip=True) or link.get('title', '') or 'Untitled PDF'
                     pdf_links.append({
                         'url': full_url,
-                        'text': link.get_text(strip=True) or 'Untitled PDF',
+                        'text': link_text_display,
                         'date': '',
                         'type': ''
                     })
@@ -407,8 +460,15 @@ class BNMScraper:
                 # Might be HTML error page or redirect
                 if 'text/html' in content_type or first_bytes == b'<!DO' or first_bytes == b'<htm':
                     error_text = response.text[:500] if hasattr(response, 'text') else str(response.content[:500])
-                    print(f"  Warning: Server returned HTML instead of PDF")
-                    print(f"  Response preview: {error_text[:100]}...")
+                    print(f"  ⚠ Warning: Server returned HTML instead of PDF")
+                    print(f"  URL: {url}")
+                    print(f"  Final URL (after redirects): {response.url}")
+                    print(f"  Content-Type: {content_type}")
+                    print(f"  Response preview: {error_text[:200]}...")
+                    # Check if this is a page URL that should be skipped
+                    url_lower = url.lower()
+                    if any(pattern in url_lower for pattern in ['/download-forms', '/download', '/forms', '/page/']):
+                        raise ValueError(f"URL appears to be a page, not a direct PDF link: {url}")
                     raise ValueError("Server returned HTML instead of PDF - URL might be incorrect or require authentication")
             
             filepath = self.output_dir / filename
@@ -458,6 +518,27 @@ class BNMScraper:
             print(f"Error extracting text from {pdf_path}: {e}")
             return ""
     
+    def extract_text_with_pages(self, pdf_path: str) -> list:
+        """Extract text content from PDF with page number tracking
+        
+        Returns:
+            List of dicts with 'text' and 'page_number' keys
+        """
+        page_texts = []
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for page_num, page in enumerate(pdf.pages, start=1):
+                    text = page.extract_text()
+                    if text and text.strip():
+                        page_texts.append({
+                            'text': text,
+                            'page_number': page_num
+                        })
+            return page_texts
+        except Exception as e:
+            print(f"Error extracting text from {pdf_path}: {e}")
+            return []
+    
     def chunk_text(self, text: str, chunk_size: int = 500, overlap: int = 50) -> list:
         """Split text into chunks for better embedding"""
         words = text.split()
@@ -470,27 +551,136 @@ class BNMScraper:
         
         return chunks
     
+    def chunk_text_with_pages(self, page_texts: list, chunk_size: int = 500, overlap: int = 50) -> list:
+        """Split text into chunks with accurate page number tracking
+        
+        This function ensures each chunk is assigned the correct page number.
+        For chunks that span multiple pages, it assigns the page number where
+        the majority of the chunk content is located.
+        
+        Args:
+            page_texts: List of dicts with 'text' and 'page_number' keys
+            chunk_size: Number of words per chunk
+            overlap: Number of words to overlap between chunks
+            
+        Returns:
+            List of dicts with 'text', 'page_number', and 'chunk_index' keys
+        """
+        chunks = []
+        chunk_index = 0
+        
+        # Combine all pages into a single list with word-level page tracking
+        all_words_with_pages = []
+        for page_data in page_texts:
+            text = page_data['text']
+            page_number = page_data['page_number']
+            words = text.split()
+            
+            # Tag each word with its page number
+            for word in words:
+                all_words_with_pages.append({
+                    'word': word,
+                    'page_number': page_number
+                })
+        
+        if not all_words_with_pages:
+            return chunks
+        
+        # Create chunks with accurate page number assignment
+        step_size = chunk_size - overlap
+        for i in range(0, len(all_words_with_pages), step_size):
+            # Get words for this chunk
+            chunk_words_data = all_words_with_pages[i:i + chunk_size]
+            
+            if not chunk_words_data:
+                continue
+            
+            # Extract words
+            chunk_words = [w['word'] for w in chunk_words_data]
+            chunk_text = ' '.join(chunk_words)
+            
+            if not chunk_text.strip():
+                continue
+            
+            # Determine page number for this chunk
+            # Count words per page in this chunk
+            page_counts = {}
+            for word_data in chunk_words_data:
+                page_num = word_data['page_number']
+                page_counts[page_num] = page_counts.get(page_num, 0) + 1
+            
+            # Assign page number based on where majority of words are
+            # If tied, use the starting page
+            if page_counts:
+                # Find page with most words
+                max_count = max(page_counts.values())
+                pages_with_max = [p for p, count in page_counts.items() if count == max_count]
+                
+                # If multiple pages have same count, prefer the starting page
+                chunk_page_number = pages_with_max[0] if len(pages_with_max) == 1 else chunk_words_data[0]['page_number']
+            else:
+                # Fallback to first word's page
+                chunk_page_number = chunk_words_data[0]['page_number']
+            
+            chunks.append({
+                'text': chunk_text,
+                'page_number': chunk_page_number,
+                'chunk_index': chunk_index
+            })
+            chunk_index += 1
+        
+        return chunks
+    
     def store_in_qdrant(self, pdf_url: str, pdf_title: str, text_chunks: list, filepath: str, 
-                       date: str = "", doc_type: str = ""):
-        """Store PDF chunks in Qdrant vector database"""
+                       date: str = "", doc_type: str = "", page_numbers: list = None):
+        """Store PDF chunks in Qdrant vector database
+        
+        Args:
+            pdf_url: URL of the PDF
+            pdf_title: Title of the PDF
+            text_chunks: List of text chunks (strings) or list of dicts with 'text' and 'page_number'
+            filepath: Path to the PDF file
+            date: Optional date string
+            doc_type: Optional document type
+            page_numbers: Optional list of page numbers (if text_chunks is list of strings)
+        """
         points = []
         
-        for idx, chunk in enumerate(text_chunks):
+        # Handle both old format (list of strings) and new format (list of dicts)
+        for idx, chunk_data in enumerate(text_chunks):
+            if isinstance(chunk_data, dict):
+                # New format with page numbers
+                chunk_text = chunk_data.get('text', '')
+                page_number = chunk_data.get('page_number')
+                chunk_idx = chunk_data.get('chunk_index', idx)
+            else:
+                # Old format (backward compatibility)
+                chunk_text = chunk_data
+                page_number = page_numbers[idx] if page_numbers and idx < len(page_numbers) else None
+                chunk_idx = idx
+            
+            if not chunk_text.strip():
+                continue
+            
             # Generate embedding
-            embedding = self.embedding_model.encode(chunk).tolist()
+            embedding = self.embedding_model.encode(chunk_text).tolist()
             
             # Create unique ID
-            chunk_id = hashlib.md5(f"{pdf_url}_{idx}".encode()).hexdigest()
+            chunk_id = hashlib.md5(f"{pdf_url}_{chunk_idx}".encode()).hexdigest()
             
             # Create point with metadata
             payload = {
                 'pdf_url': pdf_url,
                 'pdf_title': pdf_title,
-                'chunk_index': idx,
-                'chunk_text': chunk,
+                'chunk_index': chunk_idx,
+                'chunk_text': chunk_text,
                 'filepath': filepath,
                 'total_chunks': len(text_chunks)
             }
+            
+            # Add page number if available
+            if page_number is not None:
+                payload['page_number'] = page_number
             
             # Add optional metadata if available
             if date:
@@ -536,8 +726,13 @@ class BNMScraper:
         """Main method to scrape PDFs and store in Qdrant"""
         print(f"Scraping PDFs from: {self.base_url}")
         
-        # Try requests first, then Selenium if no tables found
-        soup = self.get_page_content(self.base_url, use_selenium=False)
+        # Determine initial scraping method
+        # If use_selenium is True, use Selenium from the start
+        # If use_selenium is None or False, try requests first, then Selenium as fallback
+        initial_use_selenium = use_selenium if use_selenium is True else False
+        
+        # Try requests first (or Selenium if explicitly requested)
+        soup = self.get_page_content(self.base_url, use_selenium=initial_use_selenium)
         
         # Debug: Save HTML for inspection
         debug_html_path = self.output_dir / "debug_page.html"
@@ -549,17 +744,61 @@ class BNMScraper:
         pdf_links = self.find_pdf_links(soup, self.base_url)
         print(f"Found {len(pdf_links)} PDF links")
         
-        # If no links found and Selenium is available, try with Selenium
-        if not pdf_links and SELENIUM_AVAILABLE and (use_selenium is None or use_selenium):
-            print("\nNo PDFs found with requests. Trying with Selenium (JavaScript rendering)...")
-            soup = self.get_page_content(self.base_url, use_selenium=True)
-            pdf_links = self.find_pdf_links(soup, self.base_url)
-            print(f"Found {len(pdf_links)} PDF links with Selenium")
+        # If no links found and Selenium is available, try with Selenium as fallback
+        # Always try Selenium fallback if no PDFs found (regardless of use_selenium parameter)
+        # This ensures consistent behavior whether called from API or directly
+        if not pdf_links:
+            if SELENIUM_AVAILABLE:
+                # Only try Selenium if we haven't already used it
+                if not initial_use_selenium:
+                    print("\nNo PDFs found with requests. Trying with Selenium (JavaScript rendering)...")
+                    soup = self.get_page_content(self.base_url, use_selenium=True)
+                    pdf_links = self.find_pdf_links(soup, self.base_url)
+                    print(f"Found {len(pdf_links)} PDF links with Selenium")
+                else:
+                    print("\nNo PDFs found even with Selenium. Page structure may have changed.")
+            else:
+                print("\n⚠ No PDFs found and Selenium is not available.")
+                print("   Install with: pip install selenium webdriver-manager")
         
         if not pdf_links:
+            print("\n" + "="*60)
             print("No PDF links found on the page")
+            print("="*60)
+            print(f"Debug: Page title: {soup.title.string if soup.title else 'No title'}")
+            print(f"Debug: Total tables found: {len(soup.find_all('table'))}")
+            print(f"Debug: Total links on page: {len(soup.find_all('a', href=True))}")
+            
+            # Check if page has content
+            if soup.body:
+                body_text = soup.body.get_text()
+                print(f"Debug: Body text length: {len(body_text)}")
+                if len(body_text) < 100:
+                    print("  ⚠ Warning: Page body is very short, might not have loaded correctly")
+                else:
+                    print(f"Debug: Body text preview: {body_text[:200]}")
+            
+            # Show sample links for debugging
+            all_links = soup.find_all('a', href=True)[:10]
+            if all_links:
+                print("Debug: Sample links found:")
+                for link in all_links:
+                    href = link.get('href', '')
+                    text = link.get_text(strip=True)[:50]
+                    print(f"  - {href[:80]} ({text})")
+            else:
+                print("Debug: No links found on page")
+            
             if not SELENIUM_AVAILABLE:
-                print("Tip: The page might require JavaScript. Install Selenium: pip install selenium webdriver-manager")
+                print("\n💡 Tip: The page might require JavaScript. Install Selenium:")
+                print("   pip install selenium webdriver-manager")
+            else:
+                print("\n💡 Suggestions:")
+                print("   - The page structure may have changed")
+                print("   - PDFs might be loaded dynamically via JavaScript")
+                print("   - Check the saved debug_page.html file to inspect the page structure")
+            
+            print("="*60 + "\n")
             return
         
         # Process each PDF
@@ -577,23 +816,39 @@ class BNMScraper:
             print(f"  URL: {pdf_url}")
             
             try:
+                # Validate URL before attempting download
+                url_lower = pdf_url.lower()
+                # Skip if URL looks like a page, not a direct PDF
+                if not url_lower.endswith('.pdf') and not '.pdf?' in url_lower:
+                    # Check if it's a known page pattern
+                    page_patterns = ['/download-forms', '/download', '/forms']
+                    if any(pattern in url_lower for pattern in page_patterns):
+                        print(f"  ⚠ Skipping: URL appears to be a page, not a direct PDF link")
+                        print(f"     URL: {pdf_url}")
+                        print(f"     This is likely a page containing PDF links, not a PDF itself")
+                        continue
+                
                 # Download PDF
                 filename = self.sanitize_filename(pdf_url, pdf_title)
                 filepath = self.download_pdf(pdf_url, filename)
                 print(f"  Downloaded: {filename}")
                 
-                # Extract text
-                text = self.extract_text_from_pdf(filepath)
-                if not text:
+                # Extract text with page numbers
+                page_texts = self.extract_text_with_pages(filepath)
+                if not page_texts:
                     print(f"  Warning: No text extracted from {filename}")
                     continue
                 
-                # Chunk text
-                chunks = self.chunk_text(text)
-                print(f"  Extracted {len(chunks)} text chunks")
+                # Chunk text with page tracking
+                chunked_data = self.chunk_text_with_pages(page_texts)
+                if not chunked_data:
+                    print(f"  Warning: No chunks created from {filename}")
+                    continue
+                
+                print(f"  Extracted {len(chunked_data)} text chunks with page numbers")
                 
                 # Store in Qdrant with metadata
-                self.store_in_qdrant(pdf_url, pdf_title, chunks, filepath, date, doc_type)
+                self.store_in_qdrant(pdf_url, pdf_title, chunked_data, filepath, date, doc_type)
                 
             except Exception as e:
                 print(f"  Error processing {pdf_url}: {e}")
@@ -607,7 +862,7 @@ class BNMScraper:
         print(f"[SUCCESS] Collection name: {self.collection_name}")
 
 
-class IIFAScraper:
+class IIFAScraper(BNMScraper):
     """Scraper for International Islamic Fiqh Academy (IIFA) resolutions"""
     
     def __init__(self, base_url: str, output_dir: str = "pdfs/iifa", qdrant_path: str = None, qdrant_url: str = None):
@@ -716,26 +971,46 @@ class IIFAScraper:
                 driver.quit()
     
     def find_ebook_link(self, soup: BeautifulSoup, base_url: str) -> str:
-        """Find the Download E-Book link on the resolutions page"""
+        """Find the E-Book PDF link from the IIFA resolutions page"""
         # Look for links containing "Download E-Book" or "E-Book"
         ebook_keywords = ['download e-book', 'e-book', 'ebook', 'download ebook']
+        
+        # Exclude social media and external non-PDF links
+        excluded_domains = ['facebook.com', 'twitter.com', 'linkedin.com', 'instagram.com', 
+                           'youtube.com', 'youtu.be', 'tiktok.com', 'pinterest.com']
         
         # Search in all links
         links = soup.find_all('a', href=True)
         for link in links:
             link_text = link.get_text(strip=True).lower()
             href = link.get('href', '')
+            href_lower = href.lower()
+            
+            # Skip social media and external non-PDF links
+            if any(domain in href_lower for domain in excluded_domains):
+                continue
+            
+            # Require PDF extension for E-Book links
+            if not (href_lower.endswith('.pdf') or '.pdf?' in href_lower or '.pdf/' in href_lower):
+                # Only consider if it's from the same domain and has strong ebook indicators
+                if not any(domain in href_lower for domain in ['iifa-aifi.org', base_url.lower()]):
+                    continue
+                # Must have both ebook keywords AND PDF in URL or be a direct PDF
+                if not (any(keyword in link_text for keyword in ebook_keywords) and 
+                       ('.pdf' in href_lower or 'pdf' in href_lower or 'download' in href_lower)):
+                    continue
             
             # Check if link text contains ebook keywords
             if any(keyword in link_text for keyword in ebook_keywords):
-                full_url = urljoin(base_url, href)
-                print(f"Found E-Book link: {full_url}")
-                return full_url
+                # Verify it's actually a PDF link
+                if href_lower.endswith('.pdf') or '.pdf?' in href_lower or '.pdf/' in href_lower:
+                    full_url = urljoin(base_url, href)
+                    print(f"Found E-Book link: {full_url}")
+                    return full_url
             
             # Check if href contains PDF and matches IIFA resolutions pattern
             # Pattern: /wp-content/uploads/.../IIFA-Resolutions-*.pdf
-            if '.pdf' in href.lower():
-                href_lower = href.lower()
+            if '.pdf' in href_lower and (href_lower.endswith('.pdf') or '.pdf?' in href_lower):
                 # Check for IIFA resolutions PDF pattern
                 if ('iifa' in href_lower and 'resolutions' in href_lower) or \
                    ('wp-content/uploads' in href_lower and 'resolutions' in href_lower):
@@ -758,13 +1033,6 @@ class IIFAScraper:
                         full_url = urljoin(base_url, href)
                         print(f"Found E-Book link (by href and text): {full_url}")
                         return full_url
-            
-            # Also check if href contains pdf or ebook
-            if ('.pdf' in href.lower() or 'ebook' in href.lower() or 'e-book' in href.lower()) and \
-               any(keyword in link_text for keyword in ['download', 'book', 'resolutions']):
-                full_url = urljoin(base_url, href)
-                print(f"Found E-Book link (by href): {full_url}")
-                return full_url
         
         # Fallback: look for buttons or divs with ebook text
         buttons = soup.find_all(['button', 'div', 'span'], string=re.compile(r'ebook|e-book|download.*book', re.I))
@@ -772,9 +1040,14 @@ class IIFAScraper:
             parent_link = button.find_parent('a', href=True)
             if parent_link:
                 href = parent_link.get('href', '')
-                full_url = urljoin(base_url, href)
-                print(f"Found E-Book link (from button/div): {full_url}")
-                return full_url
+                href_lower = href.lower()
+                # Only return if it's actually a PDF
+                if href_lower.endswith('.pdf') or '.pdf?' in href_lower:
+                    # Skip social media links
+                    if not any(domain in href_lower for domain in excluded_domains):
+                        full_url = urljoin(base_url, href)
+                        print(f"Found E-Book link (from button/div): {full_url}")
+                        return full_url
         
         # Additional fallback: look for links with IIFA-Resolutions pattern in href
         for link in links:
@@ -915,27 +1188,60 @@ class IIFAScraper:
     
     def store_in_qdrant(self, pdf_url: str, pdf_title: str, text_chunks: list, filepath: str, 
                        date: str = "", resolution_number: str = "", source_type: str = "ebook"):
-        """Store PDF chunks in Qdrant vector database"""
+        """Store PDF chunks in Qdrant vector database
+        
+        Args:
+            pdf_url: URL of the PDF
+            pdf_title: Title of the PDF
+            text_chunks: List of text chunks (strings) or list of dicts with 'text' and 'page_number'
+            filepath: Path to the PDF file
+            date: Optional date string
+            resolution_number: Optional resolution number
+            source_type: Type of source ('ebook' or 'resolution')
+        """
         points = []
         
-        for idx, chunk in enumerate(text_chunks):
+        # Handle both old format (list of strings) and new format (list of dicts)
+        for idx, chunk_data in enumerate(text_chunks):
+            if isinstance(chunk_data, dict):
+                # New format with page numbers
+                chunk_text = chunk_data.get('text', '')
+                page_number = chunk_data.get('page_number')
+                chunk_idx = chunk_data.get('chunk_index', idx)
+            else:
+                # Old format (backward compatibility)
+                chunk_text = chunk_data
+                page_number = None
+                chunk_idx = idx
+            
+            if not chunk_text.strip():
+                continue
+            
             # Generate embedding
-            embedding = self.embedding_model.encode(chunk).tolist()
+            try:
+                embedding = self.embedding_model.encode(chunk_text).tolist()
+            except Exception as e:
+                print(f"  Error encoding chunk {idx}: {e}")
+                continue
             
             # Create unique ID
-            chunk_id = hashlib.md5(f"{pdf_url}_{idx}".encode()).hexdigest()
+            chunk_id = hashlib.md5(f"{pdf_url}_{chunk_idx}".encode()).hexdigest()
             
             # Create point with metadata
             payload = {
                 'pdf_url': pdf_url,
                 'pdf_title': pdf_title,
-                'chunk_index': idx,
-                'chunk_text': chunk,
+                'chunk_index': chunk_idx,
+                'chunk_text': chunk_text,
                 'filepath': filepath,
                 'total_chunks': len(text_chunks),
                 'source': 'IIFA',
                 'source_type': source_type  # 'ebook' or 'resolution'
             }
+            
+            # Add page number if available
+            if page_number is not None:
+                payload['page_number'] = page_number
             
             # Add optional metadata
             if date:
@@ -952,11 +1258,15 @@ class IIFAScraper:
         
         # Insert points into Qdrant
         if points:
-            self.qdrant_client.upsert(
-                collection_name=self.collection_name,
-                points=points
-            )
-            print(f"  Stored {len(points)} chunks in Qdrant")
+            try:
+                self.qdrant_client.upsert(
+                    collection_name=self.collection_name,
+                    points=points
+                )
+                print(f"  Stored {len(points)} chunks in Qdrant")
+            except Exception as e:
+                print(f"  Error storing chunks in Qdrant: {e}")
+                raise
     
     def sanitize_filename(self, url: str, title: str) -> str:
         """Create a safe filename from URL and title"""
@@ -995,13 +1305,18 @@ class IIFAScraper:
                 filepath = self.download_pdf(ebook_url, filename)
                 print(f"  Downloaded: {filename}")
                 
-                # Extract text
-                text = self.extract_text_from_pdf(filepath)
-                if text:
-                    chunks = self.chunk_text(text)
-                    print(f"  Extracted {len(chunks)} text chunks")
-                    self.store_in_qdrant(ebook_url, "IIFA Resolutions E-Book", chunks, filepath, 
-                                       source_type="ebook")
+                # Extract text with page numbers
+                page_texts = self.extract_text_with_pages(filepath)
+                if page_texts:
+                    chunked_data = self.chunk_text_with_pages(page_texts)
+                    print(f"  Extracted {len(chunked_data)} text chunks with page numbers")
+                    self.store_in_qdrant(
+                        pdf_url=ebook_url,
+                        pdf_title="IIFA Resolutions E-Book",
+                        text_chunks=chunked_data,
+                        filepath=filepath,
+                        source_type="ebook"
+                    )
                 else:
                     print(f"  Warning: No text extracted from {filename}")
             except Exception as e:
@@ -1018,11 +1333,15 @@ class IIFAScraper:
                         filepath = self.download_pdf(ebook_url, filename)
                         print(f"  Downloaded: {filename}")
                         
-                        text = self.extract_text_from_pdf(filepath)
-                        if text:
-                            chunks = self.chunk_text(text)
-                            print(f"  Extracted {len(chunks)} text chunks")
-                            self.store_in_qdrant(ebook_url, "IIFA Resolutions E-Book", chunks, filepath, 
+                        page_texts = self.extract_text_with_pages(filepath)
+                        if page_texts:
+                            chunked_data = self.chunk_text_with_pages(page_texts)
+                            print(f"  Extracted {len(chunked_data)} text chunks with page numbers")
+                            self.store_in_qdrant(
+                                pdf_url=ebook_url,
+                                pdf_title="IIFA Resolutions E-Book",
+                                text_chunks=chunked_data,
+                                filepath=filepath, 
                                                source_type="ebook")
                     except Exception as e:
                         print(f"  Error processing E-Book: {e}")
@@ -1051,19 +1370,36 @@ class IIFAScraper:
                     filepath = self.download_pdf(pdf_url, filename)
                     print(f"  Downloaded: {filename}")
                     
-                    text = self.extract_text_from_pdf(filepath)
-                    if not text:
+                    # Extract text with page numbers
+                    page_texts = self.extract_text_with_pages(filepath)
+                    if not page_texts:
                         print(f"  Warning: No text extracted from {filename}")
                         continue
                     
-                    chunks = self.chunk_text(text)
-                    print(f"  Extracted {len(chunks)} text chunks")
+                    # Chunk text with page tracking
+                    chunked_data = self.chunk_text_with_pages(page_texts)
+                    if not chunked_data:
+                        print(f"  Warning: No chunks created from {filename}")
+                        continue
                     
-                    self.store_in_qdrant(pdf_url, pdf_title, chunks, filepath, date, resolution_num, 
-                                       source_type="resolution")
+                    print(f"  Extracted {len(chunked_data)} text chunks with page numbers")
+                    self.store_in_qdrant(
+                        pdf_url=pdf_url,
+                        pdf_title=pdf_title,
+                        text_chunks=chunked_data,
+                        filepath=filepath,
+                        date=date,
+                        resolution_number=resolution_num,
+                        source_type="resolution"
+                    )
                     
                 except Exception as e:
-                    print(f"  Error processing {pdf_url}: {e}")
+                    import traceback
+                    error_msg = str(e) if str(e) else repr(e)
+                    print(f"  Error processing {pdf_url}: {error_msg}")
+                    # Print full traceback for debugging
+                    print(f"  Full error details:")
+                    traceback.print_exc()
                     continue
         
         print(f"\n[SUCCESS] IIFA scraping complete! PDFs stored in: {self.output_dir}")
@@ -1074,7 +1410,7 @@ class IIFAScraper:
         print(f"[SUCCESS] Collection name: {self.collection_name}")
 
 
-class SCScraper:
+class SCScraper(BNMScraper):
     """Scraper for Securities Commission Malaysia (SC) Shariah Advisory Council resolutions"""
     
     def __init__(self, base_url: str, output_dir: str = "pdfs/sc", qdrant_path: str = None, qdrant_url: str = None):
@@ -1339,27 +1675,59 @@ class SCScraper:
     
     def store_in_qdrant(self, pdf_url: str, pdf_title: str, text_chunks: list, filepath: str, 
                        date: str = "", resolution_number: str = ""):
-        """Store PDF chunks in Qdrant vector database"""
+        """Store PDF chunks in Qdrant vector database
+        
+        Args:
+            pdf_url: URL of the PDF
+            pdf_title: Title of the PDF
+            text_chunks: List of text chunks (strings) or list of dicts with 'text' and 'page_number'
+            filepath: Path to the PDF file
+            date: Optional date string
+            resolution_number: Optional resolution number
+        """
         points = []
         
-        for idx, chunk in enumerate(text_chunks):
+        # Handle both old format (list of strings) and new format (list of dicts)
+        for idx, chunk_data in enumerate(text_chunks):
+            if isinstance(chunk_data, dict):
+                # New format with page numbers
+                chunk_text = chunk_data.get('text', '')
+                page_number = chunk_data.get('page_number')
+                chunk_idx = chunk_data.get('chunk_index', idx)
+            else:
+                # Old format (backward compatibility)
+                chunk_text = chunk_data
+                page_number = None
+                chunk_idx = idx
+            
+            if not chunk_text.strip():
+                continue
+            
             # Generate embedding
-            embedding = self.embedding_model.encode(chunk).tolist()
+            try:
+                embedding = self.embedding_model.encode(chunk_text).tolist()
+            except Exception as e:
+                print(f"  Error encoding chunk {idx}: {e}")
+                continue
             
             # Create unique ID
-            chunk_id = hashlib.md5(f"{pdf_url}_{idx}".encode()).hexdigest()
+            chunk_id = hashlib.md5(f"{pdf_url}_{chunk_idx}".encode()).hexdigest()
             
             # Create point with metadata
             payload = {
                 'pdf_url': pdf_url,
                 'pdf_title': pdf_title,
-                'chunk_index': idx,
-                'chunk_text': chunk,
+                'chunk_index': chunk_idx,
+                'chunk_text': chunk_text,
                 'filepath': filepath,
                 'total_chunks': len(text_chunks),
                 'source': 'SC',
                 'source_type': 'resolution'
             }
+            
+            # Add page number if available
+            if page_number is not None:
+                payload['page_number'] = page_number
             
             # Add optional metadata
             if date:
@@ -1376,11 +1744,15 @@ class SCScraper:
         
         # Insert points into Qdrant
         if points:
-            self.qdrant_client.upsert(
-                collection_name=self.collection_name,
-                points=points
-            )
-            print(f"  Stored {len(points)} chunks in Qdrant")
+            try:
+                self.qdrant_client.upsert(
+                    collection_name=self.collection_name,
+                    points=points
+                )
+                print(f"  Stored {len(points)} chunks in Qdrant")
+            except Exception as e:
+                print(f"  Error storing chunks in Qdrant: {e}")
+                raise
     
     def sanitize_filename(self, url: str, title: str) -> str:
         """Create a safe filename from URL and title"""
@@ -1454,18 +1826,36 @@ class SCScraper:
                 filepath = self.download_pdf(pdf_url, filename)
                 print(f"  Downloaded: {filename}")
                 
-                text = self.extract_text_from_pdf(filepath)
-                if not text:
+                # Extract text with page numbers
+                page_texts = self.extract_text_with_pages(filepath)
+                if not page_texts:
                     print(f"  Warning: No text extracted from {filename}")
                     continue
                 
-                chunks = self.chunk_text(text)
-                print(f"  Extracted {len(chunks)} text chunks")
+                # Chunk text with page tracking
+                chunked_data = self.chunk_text_with_pages(page_texts)
+                if not chunked_data:
+                    print(f"  Warning: No chunks created from {filename}")
+                    continue
                 
-                self.store_in_qdrant(pdf_url, pdf_title, chunks, filepath, date, resolution_num)
+                print(f"  Extracted {len(chunked_data)} text chunks with page numbers")
+                
+                self.store_in_qdrant(
+                    pdf_url=pdf_url,
+                    pdf_title=pdf_title,
+                    text_chunks=chunked_data,
+                    filepath=filepath,
+                    date=date,
+                    resolution_number=resolution_num
+                )
                 
             except Exception as e:
-                print(f"  Error processing {pdf_url}: {e}")
+                import traceback
+                error_msg = str(e) if str(e) else repr(e)
+                print(f"  Error processing {pdf_url}: {error_msg}")
+                # Print full traceback for debugging
+                print(f"  Full error details:")
+                traceback.print_exc()
                 continue
         
         print(f"\n[SUCCESS] SC scraping complete! PDFs stored in: {self.output_dir}")

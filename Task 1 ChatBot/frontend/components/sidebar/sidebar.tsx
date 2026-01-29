@@ -24,6 +24,8 @@ import {
   History,
   ChevronDown,
   Database,
+  FileSearch,
+  Plus,
 } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
@@ -123,7 +125,7 @@ export function Sidebar({
         'fixed left-0 top-0 h-full w-64 bg-background border-r border-border z-50 transform transition-transform duration-300 ease-in-out',
         'md:static md:translate-x-0', // Always visible on desktop
         isOpen ? 'translate-x-0' : '-translate-x-full',
-        'flex flex-col'
+        'flex flex-col overflow-hidden'
       )}
       >
         {/* Header */}
@@ -144,10 +146,24 @@ export function Sidebar({
           </Button>
         </div>
 
-        <ScrollArea className="flex-1">
-          <div className="p-4 space-y-6">
+        <ScrollArea className="flex-1 min-h-0">
+          <div className="p-4 space-y-6 pb-4">
               {/* Navigation */}
               <div className="space-y-1">
+                <Button
+                  variant="default"
+                  className="w-full justify-start gap-2 bg-primary hover:bg-primary/90"
+                  onClick={() => {
+                    onNewChat();
+                    if (isMobile) onClose();
+                    if (pathname !== '/chat') {
+                      window.location.href = '/chat';
+                    }
+                  }}
+                >
+                  <Plus className="w-4 h-4" />
+                  New Chat
+                </Button>
                 <Link href="/chat" className="block">
                   <Button
                     variant={pathname === '/chat' ? "default" : "ghost"}
@@ -166,53 +182,53 @@ export function Sidebar({
               </div>
 
             {/* Chat History */}
-            {chatHistory.length > 0 && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between px-2">
-                  <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                    Recent
-                  </h3>
-                  {chatHistory.length > 2 && (
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground"
-                        >
-                          <History className="w-3 h-3 mr-1" />
-                          History
-                          <ChevronDown className="w-3 h-3 ml-1" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-64 max-h-[400px] overflow-y-auto">
-                        <div className="space-y-1">
-                          {chatHistory.map((chat) => (
-                            <DropdownMenuItem
-                              key={chat.id}
-                              onClick={() => {
-                                onSelectChat(chat.id);
-                                if (isMobile) onClose();
-                              }}
-                              className={cn(
-                                "cursor-pointer",
-                                selectedChatId === chat.id && "bg-accent"
-                              )}
-                            >
-                              <MessageSquare className="w-4 h-4 mr-2 flex-shrink-0" />
-                              <div className="flex-1 min-w-0">
-                                <div className="truncate text-sm">{chat.title}</div>
-                                <div className="text-xs text-muted-foreground">
-                                  {formatDate(chat.timestamp)}
-                                </div>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between px-2">
+                <h3 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                  Recent
+                </h3>
+                {chatHistory.length > 2 && (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground"
+                      >
+                        <History className="w-3 h-3 mr-1" />
+                        History
+                        <ChevronDown className="w-3 h-3 ml-1" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-64 max-h-[400px] overflow-y-auto">
+                      <div className="space-y-1">
+                        {chatHistory.map((chat) => (
+                          <DropdownMenuItem
+                            key={chat.id}
+                            onClick={() => {
+                              onSelectChat(chat.id);
+                              if (isMobile) onClose();
+                            }}
+                            className={cn(
+                              "cursor-pointer",
+                              selectedChatId === chat.id && "bg-accent"
+                            )}
+                          >
+                            <MessageSquare className="w-4 h-4 mr-2 flex-shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <div className="truncate text-sm">{chat.title}</div>
+                              <div className="text-xs text-muted-foreground">
+                                {formatDate(chat.timestamp)}
                               </div>
-                            </DropdownMenuItem>
-                          ))}
-                        </div>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  )}
-                </div>
+                            </div>
+                          </DropdownMenuItem>
+                        ))}
+                      </div>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
+              </div>
+              {chatHistory.length > 0 ? (
                 <div className="space-y-1">
                   {chatHistory.slice(0, 2).map((chat) => (
                     <button
@@ -235,8 +251,12 @@ export function Sidebar({
                     </button>
                   ))}
                 </div>
-              </div>
-            )}
+              ) : (
+                <div className="px-3 py-2 text-xs text-muted-foreground">
+                  No recent chats
+                </div>
+              )}
+            </div>
 
             <Separator />
 
@@ -276,8 +296,8 @@ export function Sidebar({
           </div>
         </ScrollArea>
 
-        {/* Footer */}
-        <div className="p-4 border-t border-border space-y-1">
+        {/* Footer - Always visible at bottom */}
+        <div className="p-4 border-t border-border space-y-1 flex-shrink-0 bg-background">
           <Link href="/dashboard" className="block">
             <Button
               variant="ghost"
@@ -306,6 +326,21 @@ export function Sidebar({
             >
               <Database className="w-4 h-4" />
               Web Scraper
+            </Button>
+          </Link>
+          <Link href="/audit" className="block">
+            <Button
+              variant="ghost"
+              className={cn(
+                "w-full justify-start gap-2",
+                pathname === '/audit' && "bg-accent text-accent-foreground"
+              )}
+              onClick={() => {
+                if (isMobile) onClose();
+              }}
+            >
+              <FileSearch className="w-4 h-4" />
+              Audit Logs
             </Button>
           </Link>
           <Link href="/settings" className="block">

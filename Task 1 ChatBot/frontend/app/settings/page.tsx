@@ -10,12 +10,12 @@ import { SidebarToggle } from '@/components/sidebar/sidebar-toggle';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { Sparkles, Save, Trash2, Download, Upload, RotateCcw } from 'lucide-react';
 import { useTheme } from '@/components/theme-provider';
-import { getApiBaseUrl, getCollections } from '@/lib/api';
+import { getApiBaseUrl, getCollections, getRecentConversations } from '@/lib/api';
 
 export default function SettingsPage() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [chatHistory, setChatHistory] = useState<ChatHistory[]>([]);
-  const [availableCollections, setAvailableCollections] = useState<string[]>(['all']);
+  const [availableCollections, setAvailableCollections] = useState<string[]>(['all', 'bnm_pdfs', 'iifa_resolutions', 'sc_resolutions']);
   const [selectedCollections, setSelectedCollections] = useState<string[]>(['all']);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -40,22 +40,64 @@ export default function SettingsPage() {
     setDefaultCollections(savedDefaultCollections);
 
     // Load chat history
-    const savedHistory = localStorage.getItem('chatHistory');
-    if (savedHistory) {
-      try {
-        setChatHistory(JSON.parse(savedHistory));
-      } catch (e) {
-        console.error('Failed to load chat history:', e);
+    // Get or create user ID
+    const getUserId = (): string => {
+      let userId = localStorage.getItem('userId');
+      if (!userId) {
+        userId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        localStorage.setItem('userId', userId);
       }
-    }
+      return userId;
+    };
+
+    // Load chat history from backend
+    const loadChatHistoryFromBackend = async () => {
+      try {
+        const userId = getUserId();
+        const { sessions } = await getRecentConversations(userId, 20);
+        
+        const history: ChatHistory[] = sessions.map(session => ({
+          id: session.session_id,
+          title: session.title,
+          timestamp: new Date(session.timestamp).getTime()
+        }));
+        
+        setChatHistory(history);
+        localStorage.setItem('chatHistory', JSON.stringify(history));
+      } catch (err) {
+        console.error('Failed to load chat history from backend:', err);
+        // Fallback to local storage
+        const savedHistory = localStorage.getItem('chatHistory');
+        if (savedHistory) {
+          try {
+            setChatHistory(JSON.parse(savedHistory));
+          } catch (e) {
+            console.error('Failed to load local chat history:', e);
+          }
+        }
+      }
+    };
+
+    loadChatHistoryFromBackend();
 
     // Load collections
     const loadCollections = async () => {
       try {
         const cols = await getCollections();
-        setAvailableCollections(['all', ...cols]);
+        // Ensure we always have the default collections even if API returns empty or only 'all'
+        const defaultCollections = ['all', 'bnm_pdfs', 'iifa_resolutions', 'sc_resolutions'];
+        if (cols && cols.length > 0) {
+          // Merge API collections with defaults, removing duplicates
+          const merged = ['all', ...new Set([...cols.filter(c => c !== 'all'), ...defaultCollections.filter(c => c !== 'all')])];
+          setAvailableCollections(merged);
+        } else {
+          // Fallback to defaults if API returns empty
+          setAvailableCollections(defaultCollections);
+        }
       } catch (err) {
         console.error('Failed to load collections:', err);
+        // Fallback to default collections on error
+        setAvailableCollections(['all', 'bnm_pdfs', 'iifa_resolutions', 'sc_resolutions']);
       }
     };
     loadCollections();
@@ -160,8 +202,16 @@ export default function SettingsPage() {
         onClose={() => setSidebarOpen(false)}
         chatHistory={chatHistory}
         selectedChatId={null}
-        onSelectChat={() => {}}
-        onNewChat={() => {}}
+        onSelectChat={(id) => {
+          if (id) {
+            window.location.href = `/chat?session=${id}`;
+          } else {
+            window.location.href = '/chat';
+          }
+        }}
+        onNewChat={() => {
+          window.location.href = '/chat';
+        }}
         collections={availableCollections}
         selectedCollections={selectedCollections}
         onCollectionsChange={setSelectedCollections}

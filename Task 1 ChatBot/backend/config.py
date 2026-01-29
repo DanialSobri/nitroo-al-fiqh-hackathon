@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.7
     
     # Ollama Configuration (if using direct Ollama)
-    ollama_url: str = "https://example.com.my/"  # Base URL for Ollama
+    ollama_url: str = "localhost:6443/"  # Base URL for Ollama
     ollama_model: str = "phi4:14b"  # Model name to use
     
     # API Gateway Configuration (deprecated - use ollama instead)
@@ -52,6 +52,16 @@ class Settings(BaseSettings):
     max_context_length: int = 4000  # Maximum context size in characters (reduced for smaller payloads)
     enable_smart_truncation: bool = True  # Smart context prioritization
     use_compact_prompt: bool = True  # Use shorter, more compact prompt template
+    
+    # Performance optimizations
+    enable_page_lookup: bool = True  # Enable automatic PDF page number lookup (can be slow)
+    page_lookup_timeout: int = 10  # Timeout per page lookup in seconds
+    max_page_lookup_time: float = 15.0  # Maximum total time for all page lookups in seconds
+    
+    # Caching configuration
+    enable_caching: bool = True  # Enable caching for PDF content, page lookups, and embeddings
+    cache_max_size: int = 1000  # Maximum items per cache
+    cache_ttl_hours: float = 24.0  # Cache time-to-live in hours
     
     # Available collections
     collections: list[str] = ["bnm_pdfs", "iifa_resolutions", "sc_resolutions"]

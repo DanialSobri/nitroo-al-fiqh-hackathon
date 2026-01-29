@@ -3,10 +3,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from typing import List
+from typing import List, Optional
 import traceback
 import sys
 import uuid
+import asyncio
+import time
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
@@ -14,17 +16,26 @@ from concurrent.futures import ThreadPoolExecutor
 from models import (
     QuestionRequest, QuestionResponse, HealthResponse, CollectionType, 
     AnalyticsResponse, CollectionDocumentsResponse, ScraperStatus, 
-    ScraperJobRequest, ScraperJobResponse, ScraperSource, ScraperSourceRequest
+    ScraperJobRequest, ScraperJobResponse, ScraperSource, ScraperSourceRequest,
+    ScraperSchedule, ScraperScheduleRequest, AuditLogResponse, AuditLogStatistics
 )
+from pydantic import BaseModel, Field
+from audit_logging import get_audit_logger
 from rag_service import RAGService
+from conversation_memory import ConversationMemory
 from config import settings
 from scraper_config import (
-    load_sources, add_custom_source, delete_custom_source, 
+    add_custom_source, delete_custom_source, 
     get_source, get_all_sources, update_custom_source
+)
+from scheduler_service import (
+    add_schedule, update_schedule, delete_schedule, get_all_schedules,
+    get_schedule, initialize_schedules, get_scheduler_status
 )
 
 # Initialize RAG service (global instance)
 rag_service: RAGService = None
+conversation_memory: Optional[ConversationMemory] = None
 
 # Scraper state management
 scraper_status = {
@@ -45,16 +56,27 @@ executor = ThreadPoolExecutor(max_workers=1)
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events"""
     # Startup
-    global rag_service
+    global rag_service, conversation_memory
     try:
         print("Initializing RAG service...")
         rag_service = RAGService()
+        conversation_memory = rag_service.conversation_memory
         print("RAG service initialized successfully!")
     except Exception as e:
         print(f"Failed to initialize RAG service: {e}")
         print(traceback.format_exc())
         # Don't raise - allow server to start but endpoints will return 503
         rag_service = None
+        conversation_memory = None
+    
+    # Initialize scheduled scrapers
+    try:
+        print("Initializing scheduled scrapers...")
+        initialize_schedules()
+        print("Scheduled scrapers initialized successfully!")
+    except Exception as e:
+        print(f"Failed to initialize scheduled scrapers: {e}")
+        print(traceback.format_exc())
     
     yield
     
@@ -122,6 +144,50 @@ async def health_check():
         )
 
 
+@app.get("/cache/stats")
+async def get_cache_stats():
+    """Get cache statistics"""
+    try:
+        from cache_manager import get_cache_manager
+        from config import settings
+        
+        if not settings.enable_caching:
+            return {
+                "enabled": False,
+                "message": "Caching is disabled"
+            }
+        
+        cache_manager = get_cache_manager()
+        stats = cache_manager.get_stats()
+        return {
+            "enabled": True,
+            **stats
+        }
+    except Exception as e:
+        return {
+            "enabled": False,
+            "error": str(e)
+        }
+
+
+@app.post("/cache/clear")
+async def clear_cache():
+    """Clear all caches"""
+    try:
+        from cache_manager import get_cache_manager
+        cache_manager = get_cache_manager()
+        cache_manager.clear_all()
+        return {
+            "success": True,
+            "message": "All caches cleared"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
 @app.post("/ask", response_model=QuestionResponse)
 async def ask_question(request: QuestionRequest):
     """
@@ -139,6 +205,9 @@ async def ask_question(request: QuestionRequest):
         )
     
     try:
+        # Start timing
+        start_time = time.time()
+        
         # Validate and convert collections
         if not request.collections:
             request.collections = [CollectionType.ALL]
@@ -167,13 +236,19 @@ async def ask_question(request: QuestionRequest):
                     converted_collections.append(col)
             request.collections = converted_collections if converted_collections else [CollectionType.ALL]
         
-        # Call RAG service
+        # Call RAG service with conversation memory
         result = rag_service.ask_question(
             question=request.question,
             collections=request.collections,
             max_results=request.max_results,
-            min_score=request.min_score
+            min_score=request.min_score,
+            user_id=request.user_id,
+            session_id=request.session_id,
+            use_memory=True
         )
+        
+        # Calculate response time
+        response_time_ms = int((time.time() - start_time) * 1000)
         
         # Convert to response model
         response = QuestionResponse(
@@ -182,7 +257,9 @@ async def ask_question(request: QuestionRequest):
             references=result['references'],
             total_references_found=result['total_references_found'],
             collections_searched=result['collections_searched'],
-            failed_collections=result.get('failed_collections')
+            failed_collections=result.get('failed_collections'),
+            citation_map=result.get('citation_map'),
+            response_time_ms=response_time_ms
         )
         
         return response
@@ -201,6 +278,120 @@ async def ask_question(request: QuestionRequest):
         )
 
 
+class FindPageRequest(BaseModel):
+    """Request to find page number for a reference"""
+    chunk_text: str = Field(..., description="The chunk text to search for")
+    pdf_url: Optional[str] = Field(None, description="URL of the PDF")
+    filepath: Optional[str] = Field(None, description="Local file path to the PDF")
+
+
+class FindPageResponse(BaseModel):
+    """Response for finding page number for a reference"""
+    found: bool
+    page_number: Optional[int] = None
+    page_number_source: Optional[str] = None
+    context: Optional[str] = None
+    error: Optional[str] = None
+
+
+@app.post("/references/find-page", response_model=FindPageResponse)
+async def find_reference_page(request: FindPageRequest):
+    """
+    Find the exact page number for a reference by searching the PDF.
+    This is called on-demand when a user clicks on a reference link.
+    """
+    if not rag_service:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="RAG service is not initialized"
+        )
+    
+    if not request.pdf_url and not request.filepath:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either pdf_url or filepath must be provided"
+        )
+    
+    try:
+        from pdf_page_extractor import extract_sentence_location
+        
+        if not request.chunk_text or len(request.chunk_text.strip()) < 10:
+            return FindPageResponse(
+                found=False,
+                page_number=None,
+                page_number_source=None,
+                error="Chunk text is too short or empty. Need at least 10 characters to search."
+            )
+        
+        print(f"Finding page for PDF: {request.pdf_url or request.filepath}")
+        print(f"Searching for text (first 200 chars): {request.chunk_text[:200] if request.chunk_text else 'None'}...")
+        print(f"Text length: {len(request.chunk_text)} characters")
+        
+        # Run PDF processing in thread pool to avoid blocking
+        # Use asyncio.wait_for to add a timeout (60 seconds)
+        def run_extraction():
+            try:
+                return extract_sentence_location(
+                    pdf_url=request.pdf_url,
+                    pdf_filepath=request.filepath,
+                    sentence_text=request.chunk_text,
+                    case_sensitive=False,
+                    fuzzy_match=True
+                )
+            except Exception as e:
+                print(f"Error in extract_sentence_location: {e}")
+                import traceback
+                traceback.print_exc()
+                return {
+                    'found': False,
+                    'page_number': None,
+                    'sentence': request.chunk_text,
+                    'context': None,
+                    'error': str(e)
+                }
+        
+        try:
+            loop = asyncio.get_event_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, run_extraction),
+                timeout=60.0
+            )
+        except asyncio.TimeoutError:
+            print("PDF processing timed out after 60 seconds")
+            return FindPageResponse(
+                found=False,
+                page_number=None,
+                page_number_source=None,
+                error="PDF processing timed out. The PDF may be too large or the text may not be found."
+            )
+        
+        print(f"Find page result: found={result.get('found')}, page={result.get('page_number')}, error={result.get('error')}")
+        
+        if result.get('found') and result.get('page_number'):
+            return FindPageResponse(
+                found=True,
+                page_number=result['page_number'],
+                page_number_source='pdf_search',
+                context=result.get('context')
+            )
+        else:
+            error_msg = result.get('error', 'Text not found in PDF')
+            print(f"Page not found. Error: {error_msg}")
+            return FindPageResponse(
+                found=False,
+                page_number=None,
+                page_number_source=None,
+                error=error_msg
+            )
+    except Exception as e:
+        print(f"Error finding page number: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to find page number: {str(e)}"
+        )
+
+
 @app.get("/collections", response_model=List[str])
 async def get_collections():
     """Get list of available collections"""
@@ -210,7 +401,31 @@ async def get_collections():
             detail="RAG service is not initialized"
         )
     
-    return list(rag_service.vector_stores.keys())
+    # Get collections from settings (configured collections)
+    configured_collections = settings.collections
+    
+    # Get collection names from all scraper sources (including custom sources)
+    scraper_sources = get_all_sources()
+    source_collections = set()
+    for source in scraper_sources:
+        collection_name = source.get('collection_name')
+        if collection_name:
+            source_collections.add(collection_name)
+    
+    # Also include any collections that exist in vector_stores
+    initialized_collections = set(rag_service.vector_stores.keys())
+    
+    # Combine all sources: configured, from scraper sources, and initialized
+    all_collections = set(configured_collections) | source_collections | initialized_collections
+    
+    # Sort to ensure consistent order (configured first, then from sources, then others)
+    configured_set = set(configured_collections)
+    sorted_collections = sorted(all_collections, key=lambda x: (
+        0 if x in configured_set else (1 if x in source_collections else 2),
+        x
+    ))
+    
+    return sorted_collections
 
 
 @app.get("/analytics", response_model=AnalyticsResponse)
@@ -703,6 +918,277 @@ async def delete_scraper_source(source_id: str):
         )
     
     return {"message": f"Source '{source_id}' deleted successfully"}
+
+
+# ==================== Scraper Schedule Endpoints ====================
+
+@app.get("/scraper/schedules", response_model=List[ScraperSchedule])
+async def get_scraper_schedules():
+    """Get all scraper schedules"""
+    try:
+        schedules = get_all_schedules()
+        
+        # Get scheduler status to include next_run times
+        scheduler_status = get_scheduler_status()
+        job_map = {job['id']: job for job in scheduler_status['jobs']}
+        
+        result = []
+        for schedule in schedules:
+            schedule_dict = schedule.copy()
+            # Add next_run from scheduler if available
+            if schedule_dict['id'] in job_map:
+                next_run = job_map[schedule_dict['id']].get('next_run_time')
+                if next_run:
+                    schedule_dict['next_run'] = next_run
+            
+            result.append(ScraperSchedule(**schedule_dict))
+        
+        return result
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get schedules: {str(e)}"
+        )
+
+
+@app.get("/scraper/schedules/{schedule_id}", response_model=ScraperSchedule)
+async def get_scraper_schedule(schedule_id: str):
+    """Get a specific scraper schedule"""
+    try:
+        schedule = get_schedule(schedule_id)
+        if not schedule:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Schedule not found: {schedule_id}"
+            )
+        
+        # Get next_run from scheduler
+        scheduler_status = get_scheduler_status()
+        for job in scheduler_status['jobs']:
+            if job['id'] == schedule_id:
+                if job.get('next_run_time'):
+                    schedule['next_run'] = job['next_run_time']
+                break
+        
+        return ScraperSchedule(**schedule)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get schedule: {str(e)}"
+        )
+
+
+@app.post("/scraper/schedules", response_model=ScraperSchedule)
+async def create_scraper_schedule(request: ScraperScheduleRequest):
+    """Create a new scraper schedule"""
+    try:
+        # Validate schedule type and required fields
+        if request.schedule_type == 'interval':
+            if not request.interval_value or not request.interval_unit:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="interval_value and interval_unit are required for interval schedules"
+                )
+        elif request.schedule_type == 'cron':
+            # At least one cron field should be specified
+            if not any([request.cron_hour, request.cron_minute, request.cron_day, request.cron_day_of_week]):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="At least one cron field must be specified"
+                )
+        elif request.schedule_type == 'once':
+            if not request.run_at:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="run_at is required for 'once' schedules"
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid schedule_type: {request.schedule_type}. Must be 'interval', 'cron', or 'once'"
+            )
+        
+        # Validate source exists
+        source_config = get_source(request.source)
+        if not source_config and request.source != "all":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid source: {request.source}. Source not found in configuration."
+            )
+        
+        schedule_data = request.dict(exclude_none=True)
+        new_schedule = add_schedule(schedule_data)
+        
+        return ScraperSchedule(**new_schedule)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create schedule: {str(e)}"
+        )
+
+
+@app.put("/scraper/schedules/{schedule_id}", response_model=ScraperSchedule)
+async def update_scraper_schedule(schedule_id: str, request: ScraperScheduleRequest):
+    """Update an existing scraper schedule"""
+    try:
+        # Validate source if provided
+        if request.source:
+            source_config = get_source(request.source)
+            if not source_config and request.source != "all":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid source: {request.source}. Source not found in configuration."
+                )
+        
+        schedule_data = request.dict(exclude_none=True)
+        updated_schedule = update_schedule(schedule_id, schedule_data)
+        
+        if not updated_schedule:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Schedule not found: {schedule_id}"
+            )
+        
+        return ScraperSchedule(**updated_schedule)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update schedule: {str(e)}"
+        )
+
+
+@app.delete("/scraper/schedules/{schedule_id}")
+async def delete_scraper_schedule(schedule_id: str):
+    """Delete a scraper schedule"""
+    try:
+        deleted = delete_schedule(schedule_id)
+        if not deleted:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Schedule not found: {schedule_id}"
+            )
+        return {"message": f"Schedule {schedule_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete schedule: {str(e)}"
+        )
+
+
+@app.get("/scraper/scheduler/status")
+async def get_scheduler_status_endpoint():
+    """Get scheduler status"""
+    try:
+        return get_scheduler_status()
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get scheduler status: {str(e)}"
+        )
+
+
+@app.get("/audit/logs", response_model=AuditLogResponse)
+async def get_audit_logs(
+    limit: int = 100,
+    offset: int = 0,
+    llm_provider: Optional[str] = None,
+    success_only: bool = False,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
+    """Get audit logs with optional filtering"""
+    try:
+        logger = get_audit_logger()
+        logs = logger.get_logs(
+            limit=limit,
+            offset=offset,
+            llm_provider=llm_provider,
+            success_only=success_only,
+            start_date=start_date,
+            end_date=end_date
+        )
+        
+        # Get total count for pagination
+        all_logs = logger.get_logs(limit=10000, offset=0)  # Get all for count
+        total = len(all_logs)
+        
+        return AuditLogResponse(
+            logs=logs,
+            total=total,
+            limit=limit,
+            offset=offset
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get audit logs: {str(e)}"
+        )
+
+
+@app.get("/audit/statistics", response_model=AuditLogStatistics)
+async def get_audit_statistics():
+    """Get audit log statistics"""
+    try:
+        logger = get_audit_logger()
+        stats = logger.get_statistics()
+        return AuditLogStatistics(**stats)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get audit statistics: {str(e)}"
+        )
+
+
+@app.get("/conversations/recent")
+async def get_recent_conversations(
+    user_id: Optional[str] = None,
+    limit: int = 20
+):
+    """Get recent chat sessions"""
+    if not conversation_memory:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Conversation memory not available"
+        )
+    
+    try:
+        sessions = conversation_memory.get_recent_sessions(
+            user_id=user_id,
+            limit=limit
+        )
+        return {"sessions": sessions}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get conversations: {str(e)}"
+        )
+
+
+@app.get("/conversations/{session_id}")
+async def get_session_conversations(session_id: str):
+    """Get all conversations in a session"""
+    if not conversation_memory:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Conversation memory not available"
+        )
+    
+    try:
+        conversations = conversation_memory.get_session_history(session_id)
+        return {"conversations": conversations}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get session: {str(e)}"
+        )
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { getAnalytics, AnalyticsResponse, CollectionStats, getCollections, getCollectionDocuments, CollectionDocumentsResponse, DocumentInfo } from '@/lib/api';
+import { getAnalytics, AnalyticsResponse, CollectionStats, getCollections, getCollectionDocuments, CollectionDocumentsResponse, DocumentInfo, getRecentConversations } from '@/lib/api';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { FileText, Database, BarChart3, TrendingUp, Package, Loader2, Eye, ChevronDown, ChevronUp } from 'lucide-react';
 import { Sidebar, ChatHistory } from '@/components/sidebar/sidebar';
@@ -16,28 +16,71 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [chatHistory, setChatHistory] = useState<ChatHistory[]>([]);
-  const [availableCollections, setAvailableCollections] = useState<string[]>(['all']);
+  const [availableCollections, setAvailableCollections] = useState<string[]>(['all', 'bnm_pdfs', 'iifa_resolutions', 'sc_resolutions']);
   const [selectedCollections, setSelectedCollections] = useState<string[]>(['all']);
+
+  // Get or create user ID
+  const getUserId = (): string => {
+    let userId = localStorage.getItem('userId');
+    if (!userId) {
+      userId = `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      localStorage.setItem('userId', userId);
+    }
+    return userId;
+  };
+
+  // Load chat history from backend
+  const loadChatHistoryFromBackend = async () => {
+    try {
+      const userId = getUserId();
+      const { sessions } = await getRecentConversations(userId, 20);
+      
+      const history: ChatHistory[] = sessions.map(session => ({
+        id: session.session_id,
+        title: session.title,
+        timestamp: new Date(session.timestamp).getTime()
+      }));
+      
+      console.log('Dashboard: Loaded chat history:', history.length, 'sessions');
+      setChatHistory(history);
+      localStorage.setItem('chatHistory', JSON.stringify(history));
+    } catch (err) {
+      console.error('Failed to load chat history from backend:', err);
+      // Fallback to local storage
+      const savedHistory = localStorage.getItem('chatHistory');
+      if (savedHistory) {
+        try {
+          const parsed = JSON.parse(savedHistory);
+          console.log('Dashboard: Loaded chat history from localStorage:', parsed.length, 'sessions');
+          setChatHistory(parsed);
+        } catch (e) {
+          console.error('Failed to load local chat history:', e);
+        }
+      }
+    }
+  };
 
   useEffect(() => {
     loadAnalytics();
-    
-    // Load chat history and collections
-    const savedHistory = localStorage.getItem('chatHistory');
-    if (savedHistory) {
-      try {
-        setChatHistory(JSON.parse(savedHistory));
-      } catch (e) {
-        console.error('Failed to load chat history:', e);
-      }
-    }
+    loadChatHistoryFromBackend();
     
     getCollections()
       .then((cols) => {
-        setAvailableCollections(['all', ...cols]);
+        // Ensure we always have the default collections even if API returns empty or only 'all'
+        const defaultCollections = ['all', 'bnm_pdfs', 'iifa_resolutions', 'sc_resolutions'];
+        if (cols && cols.length > 0) {
+          // Merge API collections with defaults, removing duplicates
+          const merged = ['all', ...new Set([...cols.filter(c => c !== 'all'), ...defaultCollections.filter(c => c !== 'all')])];
+          setAvailableCollections(merged);
+        } else {
+          // Fallback to defaults if API returns empty
+          setAvailableCollections(defaultCollections);
+        }
       })
       .catch((err) => {
         console.error('Failed to load collections:', err);
+        // Fallback to default collections on error
+        setAvailableCollections(['all', 'bnm_pdfs', 'iifa_resolutions', 'sc_resolutions']);
       });
   }, []);
 
@@ -125,8 +168,16 @@ export default function DashboardPage() {
         onClose={() => setSidebarOpen(false)}
         chatHistory={chatHistory}
         selectedChatId={null}
-        onSelectChat={() => {}}
-        onNewChat={() => {}}
+        onSelectChat={(id) => {
+          if (id) {
+            window.location.href = `/chat?session=${id}`;
+          } else {
+            window.location.href = '/chat';
+          }
+        }}
+        onNewChat={() => {
+          window.location.href = '/chat';
+        }}
         collections={availableCollections}
         selectedCollections={selectedCollections}
         onCollectionsChange={setSelectedCollections}
