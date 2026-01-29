@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     qdrant_regulations_collection: str = "shariah-regulations-law"
     embedding_model: str = "all-MiniLM-L6-v2"
     embedding_dimension: int = 384
-    llm_api_url: str = "http://localhost:11434/api/generate"
+    llm_api_url: str = "http://localhost:11434/api/chat"
     llm_model_name: str = "llama2"
     
     class Config:

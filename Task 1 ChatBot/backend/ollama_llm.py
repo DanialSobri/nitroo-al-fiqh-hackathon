@@ -18,7 +18,7 @@ class OllamaLLM:
         Initialize Ollama LLM client
         
         Args:
-            base_url: Base URL for Ollama (e.g., localhost:6443/)
+            base_url: Base URL for Ollama (e.g., http://localhost:11434)
             model: Model name to use (default: phi4:14b)
         """
         # Ensure base_url ends with /

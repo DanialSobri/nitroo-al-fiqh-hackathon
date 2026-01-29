@@ -202,7 +202,7 @@ See `backend/ENV_TEMPLATE.txt` for all available environment variables:
 
 **Key Settings:**
 - `LLM_PROVIDER`: `ollama` (default) or `openai`
-- `OLLAMA_URL`: Ollama server URL (default: `https://example.com.my/`)
+- `OLLAMA_URL`: Ollama server URL (default: `http://localhost:11434`)
 - `OLLAMA_MODEL`: Model name (default: `phi4:14b`)
 - `QDRANT_URL`: Qdrant server URL (default: `http://localhost:6333`)
 - `OPENAI_API_KEY`: Required if using OpenAI
