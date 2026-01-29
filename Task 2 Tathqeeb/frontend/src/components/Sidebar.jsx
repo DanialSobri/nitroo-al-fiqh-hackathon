@@ -1,8 +1,8 @@
 import React from 'react';
-import { Home, Plus, Compass, BarChart3, BookOpen } from 'lucide-react';
+import { Home, Plus, Compass, BarChart3, BookOpen, Coins } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 
-const Sidebar = () => {
+const Sidebar = ({ mobileOpen, setMobileOpen }) => {
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -17,7 +17,7 @@ const Sidebar = () => {
   };
 
   return (
-    <div className="fixed left-0 top-0 h-full w-16 bg-white border-r border-gray-200 flex flex-col items-center py-4 z-50">
+    <div className={`fixed left-0 top-0 h-full w-16 bg-white border-r border-gray-200 flex flex-col items-center py-4 z-50 transition-transform duration-300 ${mobileOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0`}>
       {/* Logo */}
       <div className="mb-6 p-2 cursor-pointer" onClick={() => navigate('/')}>
         <div className="w-8 h-8 flex items-center justify-center">
@@ -53,6 +53,12 @@ const Sidebar = () => {
           active={isActive('/analytics')}
           onClick={() => navigate('/analytics')}
           label="Analytics"
+        />
+        <NavItem 
+          icon={<Coins size={20} />} 
+          active={isActive('/tokens')}
+          onClick={() => navigate('/tokens')}
+          label="Tokens"
         />
         <NavItem 
           icon={<BookOpen size={20} />} 

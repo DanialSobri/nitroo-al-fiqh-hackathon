@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 const client = axios.create({
-  baseURL: 'http://localhost:8000', // Direct API URL since we running React locally
+  baseURL: 'http://localhost:8000', // Direct API URL since we running React locally - FASTAPI URL
   headers: {
     'Content-Type': 'application/json',
   },
@@ -49,6 +49,11 @@ export const rateContract = async (contractId, rating) => {
 
 export const getAnalytics = async () => {
   const response = await client.get('/contracts/analytics/summary');
+  return response.data;
+};
+
+export const getTokenStatistics = async () => {
+  const response = await client.get('/contracts/analytics/tokens');
   return response.data;
 };
 

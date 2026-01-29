@@ -8,6 +8,14 @@ class ComplianceCategory(str, Enum):
     PARTIALLY_COMPLIANT = "partially_compliant"
     NON_COMPLIANT = "non_compliant"
 
+class TokenUsage(BaseModel):
+    """Token usage information for LLM calls"""
+    prompt_tokens: int = Field(0, description="Number of input tokens")
+    completion_tokens: int = Field(0, description="Number of output tokens")
+    total_tokens: int = Field(0, description="Total tokens used")
+    process_time: float = Field(0.0, description="Processing time in seconds")
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+
 class RegulationInput(BaseModel):
     title: str = Field(..., description="Title of the Shariah regulation")
     content: str = Field(..., description="Content of the regulation")
@@ -31,9 +39,11 @@ class ContractUploadResponse(BaseModel):
 class ViolationDetail(BaseModel):
     regulation_title: str
     regulation_reference: Optional[str]
-    violated_section: str
+    violated_clause: str
     description: str
     severity: str
+    pages: Optional[List[int]] = Field(default_factory=list, description="Page numbers where violation occurs")
+    reasoning: Optional[str] = Field(None, description="Step-by-step reasoning for the violation")
 
 class ComplianceCheckResponse(BaseModel):
     contract_id: str
@@ -46,6 +56,7 @@ class ComplianceCheckResponse(BaseModel):
     summary: str
     recommendations: List[str] = Field(default_factory=list, description="Next best actions for the user")
     checked_at: datetime
+    token_usage: Optional[TokenUsage] = Field(None, description="Token usage for this compliance check")
 
 class ComplianceReportRequest(BaseModel):
     contract_id: str
@@ -64,6 +75,29 @@ class ScholarReviewResponse(BaseModel):
     status: str
     submitted_at: str
     message: str
+
+class TokenManagementResponse(BaseModel):
+    """Response for token management dashboard"""
+    contract_id: str
+    filename: str
+    checked_at: datetime
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    process_time: float = Field(0.0, description="Processing time in seconds")
+    compliance_score: Optional[float] = None
+    category: Optional[str] = None
+
+class TokenStatisticsResponse(BaseModel):
+    """Aggregate token statistics"""
+    total_contracts_analyzed: int
+    total_prompt_tokens: int
+    total_completion_tokens: int
+    total_tokens: int
+    total_process_time: float = Field(0.0, description="Total processing time in seconds")
+    avg_tokens_per_contract: float
+    avg_process_time_per_contract: float = Field(0.0, description="Average processing time per contract in seconds")
+    contracts: List[TokenManagementResponse]
 
 class AnalyticsResponse(BaseModel):
     total_contracts: int

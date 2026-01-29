@@ -1,6 +1,8 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
 from typing import List
 import uuid
+import os
 from app.models.schemas import (
     ContractUploadResponse, 
     ComplianceCheckResponse, 
@@ -8,7 +10,8 @@ from app.models.schemas import (
     ContractRatingRequest,
     AnalyticsResponse,
     ScholarReviewRequest,
-    ScholarReviewResponse
+    ScholarReviewResponse,
+    TokenStatisticsResponse
 )
 from app.services.pdf_service import pdf_service
 from app.services.embedding_service import embedding_service
@@ -31,28 +34,41 @@ async def upload_contract(file: UploadFile = File(...)):
     try:
         pdf_content = await file.read()
         
-        text = pdf_service.extract_text_from_pdf(pdf_content)
+        # Extract text with page numbers
+        pages_data = pdf_service.extract_text_with_pages(pdf_content)
         
-        if not text.strip():
+        if not pages_data:
             raise HTTPException(status_code=400, detail="No text could be extracted from the PDF")
         
-        chunks = pdf_service.chunk_text(text)
+        # Create chunks with page tracking
+        chunks_with_pages = pdf_service.chunk_by_page(pages_data)
         
-        embeddings = embedding_service.embed_texts(chunks)
+        # Extract just text for embeddings
+        texts = [chunk["text"] for chunk in chunks_with_pages]
+        embeddings = embedding_service.embed_texts(texts)
         
         contract_id = str(uuid.uuid4())
         
+        # Save PDF file
+        pdf_path = pdf_service.save_pdf(pdf_content, contract_id, file.filename)
+        
         chunks_count = qdrant_service.insert_contract_chunks(
             contract_id=contract_id,
-            chunks=chunks,
+            chunks=chunks_with_pages,
             embeddings=embeddings,
-            metadata={"filename": file.filename}
+            metadata={
+                "filename": file.filename,
+                "pdf_path": pdf_path
+            }
         )
+        
+        # Calculate total text length
+        total_text = "".join([page["text"] for page in pages_data])
         
         return ContractUploadResponse(
             contract_id=contract_id,
             filename=file.filename,
-            text_length=len(text),
+            text_length=len(total_text),
             chunks_created=chunks_count,
             message="Contract uploaded and processed successfully"
         )
@@ -131,6 +147,15 @@ async def get_analytics():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to retrieve analytics: {str(e)}")
 
+@router.get("/analytics/tokens", response_model=TokenStatisticsResponse)
+async def get_token_statistics():
+    """Get token usage statistics from all contracts"""
+    try:
+        token_stats = qdrant_service.get_token_statistics()
+        return TokenStatisticsResponse(**token_stats)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve token statistics: {str(e)}")
+
 @router.post("/submit-to-scholar", response_model=ScholarReviewResponse)
 async def submit_to_scholar(review_request: ScholarReviewRequest):
     """Submit contract to scholar for double-checking"""
@@ -149,4 +174,31 @@ async def submit_to_scholar(review_request: ScholarReviewRequest):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to submit to scholar: {str(e)}")
+
+@router.get("/pdf/{contract_id}")
+async def get_contract_pdf(contract_id: str):
+    """Serve the PDF file for a contract"""
+    try:
+        # Get contract metadata to find PDF path
+        chunks = qdrant_service.get_contract_chunks(contract_id)
+        if not chunks:
+            raise HTTPException(status_code=404, detail="Contract not found")
+        
+        pdf_path = chunks[0].get("pdf_path")
+        if not pdf_path or not os.path.exists(pdf_path):
+            raise HTTPException(status_code=404, detail="PDF file not found")
+        
+        return FileResponse(
+            path=pdf_path,
+            media_type="application/pdf",
+            filename=chunks[0].get("filename", "contract.pdf"),
+            headers={
+                "Content-Disposition": f"inline; filename=\"{chunks[0].get('filename', 'contract.pdf')}\"",
+                "Cache-Control": "public, max-age=3600"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve PDF: {str(e)}")
 

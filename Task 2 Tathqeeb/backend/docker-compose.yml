@@ -27,8 +27,8 @@ services:
       - QDRANT_REGULATIONS_COLLECTION=shariah-regulations-law
       - EMBEDDING_MODEL=all-MiniLM-L6-v2
       - EMBEDDING_DIMENSION=384
-      - LLM_API_URL=
-      - LLM_MODEL_NAME=g
+      - LLM_API_URL=http://localhost:11434/api/chat
+      - LLM_MODEL_NAME=gemma3:27b
     volumes:
       - ./app:/app/app
     networks:

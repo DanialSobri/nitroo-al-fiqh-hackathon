@@ -1,11 +1,14 @@
 import React, { useState } from 'react';
-import { CheckCircle, AlertTriangle, XCircle, ChevronDown, ChevronUp, FileText, ArrowLeft, Download, Share2, Library, Lightbulb, ArrowRight, UserCheck, Send } from 'lucide-react';
+import { CheckCircle, AlertTriangle, XCircle, ChevronDown, ChevronUp, FileText, ArrowLeft, Download, Share2, Library, Lightbulb, ArrowRight, UserCheck, Send, ExternalLink } from 'lucide-react';
+import PDFViewer from './PDFViewer';
 
 const ComplianceReport = ({ report, onBack, onSubmitToScholar }) => {
   const [expandedViolations, setExpandedViolations] = useState({});
   const [showScholarModal, setShowScholarModal] = useState(false);
   const [scholarNotes, setScholarNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [showPDFViewer, setShowPDFViewer] = useState({ show: false, clause: '' });
+  const [pdfHighlightPages, setPdfHighlightPages] = useState([]);
 
   if (!report) return null;
 
@@ -20,6 +23,11 @@ const ComplianceReport = ({ report, onBack, onSubmitToScholar }) => {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleViewInPDF = (pages, clause = '') => {
+    setPdfHighlightPages(pages || []);
+    setShowPDFViewer({ show: true, clause });
   };
 
   const toggleViolation = (index) => {
@@ -210,6 +218,7 @@ const ComplianceReport = ({ report, onBack, onSubmitToScholar }) => {
             <Lightbulb size={20} className="text-amber-500" />
             Recommended Next Actions
           </h3>
+          <p className="text-sm text-gray-600 mb-4">These are AI-generated suggestions to improve Shariah compliance based on the analysis.</p>
           <div className="bg-gradient-to-br from-amber-50 to-orange-50 p-6 rounded-xl border border-amber-200 shadow-sm">
             <div className="space-y-3">
               {report.recommendations.map((recommendation, index) => (
@@ -267,18 +276,41 @@ const ComplianceReport = ({ report, onBack, onSubmitToScholar }) => {
                       
                       <div className="bg-gray-50 p-4 rounded-lg border border-gray-200">
                         <span className="text-xs font-bold text-gray-500 uppercase tracking-wider block mb-2">Violated Contract Section</span>
-                        <p className="text-gray-700 italic leading-relaxed">"{violation.violated_section}"</p>
+                        <p className="text-gray-700 italic leading-relaxed">"{violation.violated_clause}"</p>
                       </div>
                       
-                      {violation.regulation_reference && (
-                        <div className="flex items-start gap-2 text-sm text-gray-600 bg-blue-50 p-3 rounded-lg border border-blue-100">
-                          <Library size={16} className="mt-0.5 text-blue-600 shrink-0" />
-                          <div>
-                            <span className="font-semibold text-blue-900 block mb-1">Reference:</span>
-                            <span>{violation.regulation_reference}</span>
-                          </div>
+                      {violation.reasoning && (
+                        <div className="bg-blue-50 p-4 rounded-lg border border-blue-100">
+                          <span className="text-xs font-bold text-blue-800 uppercase tracking-wider block mb-2">AI Reasoning</span>
+                          <p className="text-blue-900 leading-relaxed whitespace-pre-line">{violation.reasoning}</p>
                         </div>
                       )}
+                      
+                      <div className="flex gap-3">
+                        {violation.regulation_reference && (
+                          <div className="flex-1 flex items-start gap-2 text-sm text-gray-600 bg-blue-50 p-3 rounded-lg border border-blue-100">
+                            <Library size={16} className="mt-0.5 text-blue-600 shrink-0" />
+                            <div>
+                              <span className="font-semibold text-blue-900 block mb-1">Reference:</span>
+                              <span>{violation.regulation_reference}</span>
+                            </div>
+                          </div>
+                        )}
+                        
+                        {violation.violated_clause && (
+                          <button
+                            onClick={() => handleViewInPDF(violation.pages, violation.violated_clause)}
+                            className="flex items-center gap-2 px-4 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors font-medium text-sm"
+                          >
+                            <FileText size={16} />
+                            {violation.pages && violation.pages.length > 0 
+                              ? `View on Page ${violation.pages.map(p => p + 1).join(', ')}`
+                              : 'View in PDF'
+                            }
+                            <ExternalLink size={14} />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}
@@ -286,6 +318,16 @@ const ComplianceReport = ({ report, onBack, onSubmitToScholar }) => {
             ))}
           </div>
         </div>
+      )}
+
+      {/* PDF Viewer Modal */}
+      {showPDFViewer.show && (
+        <PDFViewer
+          contractId={report.contract_id}
+          highlightPages={pdfHighlightPages}
+          violatedClause={showPDFViewer.clause}
+          onClose={() => setShowPDFViewer({ show: false, clause: '' })}
+        />
       )}
     </div>
   );

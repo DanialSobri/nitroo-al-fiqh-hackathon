@@ -38,21 +38,34 @@ class QdrantService:
                     )
                 )
     
+    def _ensure_collection(self, collection_name: str):
+        existing_collections = [col.name for col in self.client.get_collections().collections]
+        if collection_name not in existing_collections:
+            self.client.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(
+                    size=settings.embedding_dimension,
+                    distance=Distance.COSINE
+                )
+            )
     def insert_contract_chunks(
         self,
         contract_id: str,
-        chunks: List[str],
+        chunks: List[Dict],
         embeddings: List[List[float]],
         metadata: Dict
     ) -> int:
+        self._ensure_collection(settings.qdrant_contracts_collection)
         points = []
-        for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+        for idx, (chunk_data, embedding) in enumerate(zip(chunks, embeddings)):
             point_id = str(uuid.uuid4())
             payload = {
                 "contract_id": contract_id,
                 "chunk_index": idx,
-                "text": chunk,
+                "text": chunk_data["text"] if isinstance(chunk_data, dict) else chunk_data,
+                "pages": chunk_data.get("pages", []) if isinstance(chunk_data, dict) else [],
                 "filename": metadata.get("filename", ""),
+                "pdf_path": metadata.get("pdf_path", ""),
                 "created_at": datetime.utcnow().isoformat()
             }
             points.append(PointStruct(
@@ -97,6 +110,7 @@ class QdrantService:
         )
 
     def update_contract_status(self, contract_id: str, score: float, category: str, status_summary: str, full_report: Optional[Dict] = None):
+        self._ensure_collection(settings.qdrant_contracts_collection)
         # Find the first chunk (metadata holder)
         results = self.client.scroll(
             collection_name=settings.qdrant_contracts_collection,
@@ -134,6 +148,7 @@ class QdrantService:
         )
     
     def get_contract_report(self, contract_id: str) -> Optional[Dict]:
+        self._ensure_collection(settings.qdrant_contracts_collection)
         # Get the first chunk which contains metadata
         results = self.client.scroll(
             collection_name=settings.qdrant_contracts_collection,
@@ -177,6 +192,7 @@ class QdrantService:
         ]
     
     def get_contract_chunks(self, contract_id: str) -> List[Dict]:
+        self._ensure_collection(settings.qdrant_contracts_collection)
         results = self.client.scroll(
             collection_name=settings.qdrant_contracts_collection,
             scroll_filter=Filter(
@@ -213,6 +229,7 @@ class QdrantService:
         ]
     
     def get_all_contracts(self) -> List[Dict]:
+        self._ensure_collection(settings.qdrant_contracts_collection)
         # Optimize by getting only the first chunk of each contract
         results = self.client.scroll(
             collection_name=settings.qdrant_contracts_collection,
@@ -247,6 +264,7 @@ class QdrantService:
         ]
     
     def update_contract_rating(self, contract_id: str, rating: int):
+        self._ensure_collection(settings.qdrant_contracts_collection)
         """Update user rating for a contract (1 for thumbs up, -1 for thumbs down, 0 for neutral)"""
         # Find the first chunk (metadata holder)
         results = self.client.scroll(
@@ -277,6 +295,7 @@ class QdrantService:
         )
     
     def submit_to_scholar(self, contract_id: str, notes: Optional[str] = None) -> Dict:
+        self._ensure_collection(settings.qdrant_contracts_collection)
         """Submit contract for scholar review"""
         # Find the first chunk (metadata holder)
         results = self.client.scroll(
@@ -377,6 +396,60 @@ class QdrantService:
             "compliance_trend": compliance_trend
         }
     
+    def get_token_statistics(self) -> Dict:
+        """Get token usage statistics from all contracts"""
+        contracts = self.get_all_contracts()
+        
+        token_data = []
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        total_tokens = 0
+        total_process_time = 0.0
+        contracts_with_data = 0
+        
+        for contract in contracts:
+            contract_id = contract.get("contract_id")
+            report = self.get_contract_report(contract_id)
+            
+            if report and "token_usage" in report:
+                token_usage = report["token_usage"]
+                prompt_tokens = token_usage.get("prompt_tokens", 0)
+                completion_tokens = token_usage.get("completion_tokens", 0)
+                tokens_total = token_usage.get("total_tokens", 0)
+                process_time = token_usage.get("process_time", 0.0)
+                
+                token_data.append({
+                    "contract_id": contract_id,
+                    "filename": contract.get("filename", "Unknown"),
+                    "checked_at": report.get("checked_at", contract.get("last_checked_at", "")),
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": tokens_total,
+                    "process_time": process_time,
+                    "compliance_score": contract.get("compliance_score"),
+                    "category": contract.get("compliance_category")
+                })
+                
+                total_prompt_tokens += prompt_tokens
+                total_completion_tokens += completion_tokens
+                total_tokens += tokens_total
+                total_process_time += process_time
+                contracts_with_data += 1
+        
+        avg_tokens = total_tokens / contracts_with_data if contracts_with_data > 0 else 0
+        avg_process_time = total_process_time / contracts_with_data if contracts_with_data > 0 else 0.0
+        
+        return {
+            "total_contracts_analyzed": contracts_with_data,
+            "total_prompt_tokens": total_prompt_tokens,
+            "total_completion_tokens": total_completion_tokens,
+            "total_tokens": total_tokens,
+            "total_process_time": round(total_process_time, 2),
+            "avg_tokens_per_contract": round(avg_tokens, 2),
+            "avg_process_time_per_contract": round(avg_process_time, 2),
+            "contracts": sorted(token_data, key=lambda x: x.get("checked_at", ""), reverse=True)
+        }
+
     def health_check(self) -> Dict:
         try:
             collections_info = self.client.get_collections()

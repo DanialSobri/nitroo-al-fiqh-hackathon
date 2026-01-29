@@ -35,7 +35,16 @@ const UploadView = ({ onFileSelect }) => {
   return (
     <div className="flex-1 flex flex-col items-center justify-center min-h-[70vh] w-full max-w-4xl mx-auto px-6 fade-in duration-500">
       <div className="text-center mb-10 space-y-3">
-        <h1 className="text-4xl font-bold text-gray-900 tracking-tight">
+        {/* Logo */}
+        <div className="flex justify-center mb-4">
+          <div className="w-16 h-16 flex items-center justify-center bg-green-100 rounded-2xl shadow-sm">
+            <svg viewBox="0 0 24 24" className="w-8 h-8 text-green-600" fill="currentColor">
+              <path d="M12 2L2 7L12 12L22 7L12 2Z" />
+              <path d="M2 17L12 22L22 17V12L12 17L2 12V17Z" opacity="0.8" />
+            </svg>
+          </div>
+        </div>
+        <h1 className="text-4xl font-bold text-green-600 tracking-tight">
           Tathqeeb AI Compliance Checker
         </h1>
         <p className="text-lg text-gray-500 max-w-2xl mx-auto">
@@ -47,8 +56,8 @@ const UploadView = ({ onFileSelect }) => {
         {...getRootProps()} 
         className={`w-full max-w-2xl text-center p-12 rounded-3xl border-2 border-dashed transition-all duration-300 cursor-pointer relative overflow-hidden group
           ${isDragActive 
-            ? 'border-teal-500 bg-teal-50 shadow-lg scale-[1.01]' 
-            : 'border-gray-200 hover:border-teal-400 hover:bg-gray-50/50 hover:shadow-md'
+            ? 'border-green-500 bg-green-50 shadow-lg scale-[1.01]' 
+            : 'border-gray-200 hover:border-green-400 hover:bg-gray-50/50 hover:shadow-md'
           }
           ${error ? 'border-red-300 bg-red-50/30' : ''}
         `}
@@ -56,7 +65,7 @@ const UploadView = ({ onFileSelect }) => {
         <input {...getInputProps()} />
         
         <div className="flex flex-col items-center gap-6 relative z-10">
-          <div className={`w-20 h-20 rounded-2xl flex items-center justify-center transition-colors duration-300 ${isDragActive ? 'bg-teal-100 text-teal-600' : 'bg-gray-100 text-gray-400 group-hover:bg-teal-50 group-hover:text-teal-500'}`}>
+          <div className={`w-20 h-20 rounded-2xl flex items-center justify-center transition-colors duration-300 ${isDragActive ? 'bg-green-100 text-green-600' : 'bg-gray-100 text-gray-400 group-hover:bg-green-50 group-hover:text-green-500'}`}>
             <Upload size={36} strokeWidth={1.5} />
           </div>
 
@@ -77,7 +86,7 @@ const UploadView = ({ onFileSelect }) => {
         </div>
 
         {/* Decorative background gradients */}
-        <div className="absolute top-0 left-1/4 w-1/2 h-1/2 bg-teal-500/5 rounded-full blur-3xl -z-0 transform -translate-y-1/2 pointer-events-none"></div>
+        <div className="absolute top-0 left-1/4 w-1/2 h-1/2 bg-green-500/5 rounded-full blur-3xl -z-0 transform -translate-y-1/2 pointer-events-none"></div>
       </div>
 
       {error && (

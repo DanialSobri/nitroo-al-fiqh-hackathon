@@ -42,13 +42,13 @@ const ProcessingView = () => {
               key={index}
               className={`flex items-center gap-4 p-4 rounded-xl border transition-all duration-500
                 ${isPending ? 'border-transparent opacity-40' : ''}
-                ${isActive ? 'border-teal-100 bg-teal-50/50 scale-[1.02] shadow-sm' : ''}
+                ${isActive ? 'border-green-100 bg-green-50/50 scale-[1.02] shadow-sm' : ''}
                 ${isCompleted ? 'border-gray-100 bg-white' : ''}
               `}
             >
               <div className={`
                 w-10 h-10 rounded-full flex items-center justify-center shrink-0 transition-colors duration-500
-                ${isActive ? 'bg-teal-600 text-white' : ''}
+                ${isActive ? 'bg-green-600 text-white' : ''}
                 ${isCompleted ? 'bg-green-100 text-green-600' : ''}
                 ${isPending ? 'bg-gray-100 text-gray-400' : ''}
               `}>
@@ -62,11 +62,11 @@ const ProcessingView = () => {
               </div>
 
               <div className="flex-1">
-                 <h4 className={`font-medium transition-colors duration-300 ${isActive ? 'text-teal-900' : 'text-gray-700'}`}>
+                 <h4 className={`font-medium transition-colors duration-300 ${isActive ? 'text-green-900' : 'text-gray-700'}`}>
                    {stage.label}
                  </h4>
                  {isActive && (
-                   <p className="text-xs text-teal-600 mt-0.5 animate-pulse">Processing...</p>
+                   <p className="text-xs text-green-600 mt-0.5 animate-pulse">Processing...</p>
                  )}
               </div>
             </div>
